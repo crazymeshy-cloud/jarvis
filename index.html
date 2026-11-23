@@ -53,6 +53,7 @@
   <button class="air" id="add">➕ כדור</button>
   <button class="air" id="clear">🧹 נקה</button>
   <button class="air" id="cam">📷</button>
+  <button class="air" id="twohands">☝️ יד אחת</button>
   <button id="copylog">📋 לוג</button>
 </div>
 <div id="logbox" style="display:none;position:fixed;inset:10% 6%;z-index:6;background:#011;border:1px solid #0ff;border-radius:12px;padding:12px;flex-direction:column;gap:8px">
@@ -155,7 +156,8 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const HOLD_GRAB=140, HOLD_CREATE=260, LOST_MS=280, MIN_HAND_PX=45;
+const HOLD_GRAB=140, HOLD_CREATE=260, LOST_MS=650, MIN_HAND_PX=45;
+let TWO_HANDS=false;   // one hand = much faster detection on phones (skips searching for a 2nd hand)
 
 /* ---------- black-box recorder: what happened, so Claude can analyse a session ---------- */
 const T0=performance.now(), LOG=[], STATS={};
@@ -172,25 +174,33 @@ function handleHands(res){
   (res.landmarks||[]).forEach((lms,i)=>{
     const cat=res.handedness&&res.handedness[i]&&res.handedness[i][0];
     if(cat&&cat.score<0.75){log('lowScore');return;}     // unsure detection → ignore
-    let slot=cat&&cat.categoryName==='Right'?1:0;
-    if(used.has(slot))slot=1-slot; if(used.has(slot))return; used.add(slot);
-    const P=lms.map(mapPt), h=hands[slot];
+    const P=lms.map(mapPt);
+    // slot by POSITION (closest to where a hand was), not by left/right label — the label flips on front cameras
+    let slot=0;
+    if(TWO_HANDS){
+      let best=-1,bd=1e9;
+      [0,1].forEach(i=>{ if(used.has(i))return; const t=hands[i].target; const d=t?Math.hypot(t.x-P[9].x,t.y-P[9].y):5000+i; if(d<bd){bd=d;best=i;} });
+      if(best<0)return; slot=best;
+    } else if(used.has(0))return;
+    used.add(slot);
+    const h=hands[slot];
+    h.edge=lms[9].x<0.07||lms[9].x>0.93||lms[9].y<0.07||lms[9].y>0.93;
     const size=dist(P[0],P[9]);
     if(size<MIN_HAND_PX){log('tooSmall');return;}       // too far / tiny → ignore
     h.P=P; h.lastSeen=now; h.frames=(h.frames||0)+1;
-    if(h.frames===1)log('hand+',slot?'R':'L');
+    if(h.frames===1)log('hand+',slot?'B':'A');
     h.target={x:(P[4].x+P[8].x)/2,y:(P[4].y+P[8].y)/2};
     if(h.sx==null){h.sx=h.target.x;h.sy=h.target.y;}
     h.pointing=extended(P,8,6)&&!extended(P,12,10)&&!extended(P,16,14)&&!extended(P,20,18);
     const pinchD=dist(P[4],P[8])/size;
     h.pinchD=pinchD;
-    if(pinchD<0.30){ h.openCount=0; if(h.closeSince==null){h.closeSince=now;log('pinchDown',(slot?'R':'L')+(h.pinching?' (already)':''));} }
-    else if(pinchD>0.50){ h.closeSince=null; h.openCount=(h.openCount||0)+1; }
-    else if(!h.pinching){ h.closeSince=null; }          // half-closed doesn't start anything
+    if(pinchD<0.34){ h.openCount=0; if(h.closeSince==null){h.closeSince=now;log('pinchDown',(slot?'B':'A')+(h.pinching?' (already)':''));} }
+    else if(pinchD>0.50){ h.openCount=(h.openCount||0)+1; if(h.openCount>=2)h.closeSince=null; }   // cancel only when CLEARLY open twice
+    // in-between values are noise: they neither start nor cancel anything
   });
 }
 function forgetHand(h){
-  log('hand-',(hands.indexOf(h)?'R':'L')+(h.action?' while '+h.action.kind:''));
+  log('hand-',(hands.indexOf(h)?'B':'A')+(h.action?' while '+h.action.kind:''));
   if(h.action)h.endReason='lost';
   endAction(h);
   Object.assign(h,{pinching:false,P:null,sx:null,target:null,hist:[],dwellBtn:null,frames:0,closeSince:null,openCount:0,pointing:false});
@@ -242,7 +252,7 @@ function endAction(h){
     if(len<30)shapes=shapes.filter(s=>s!==a.line);            // tiny accidental scribble → discard
   } else if(a.kind==='box'){
     const x=Math.min(a.x0,a.x1),y=Math.min(a.y0,a.y1),w=Math.abs(a.x1-a.x0),hh=Math.abs(a.y1-a.y0);
-    if(w<40||hh<30)return;
+    if(w<30||hh<25){log('tooSmallShape',`${Math.round(w)}x${Math.round(hh)}`);flash('קטן מדי — תגרור יותר',a.x0,a.y0);return;}
     if(a.type==='rect')shapes.push({type:'rect',x,y,w,h:hh,color:a.color});
     else{
       const kind=WIN_KINDS[winCount%WIN_KINDS.length];winCount++;
@@ -439,6 +449,7 @@ function drawHands(t){
         ctx.strokeStyle='#0ff';ctx.lineWidth=4;ctx.beginPath();
         ctx.arc(h.sx,h.sy,22,-Math.PI/2,-Math.PI/2+h.charge*Math.PI*2);ctx.stroke();
       }
+      if(h.edge){ctx.fillStyle='#ffd23d';ctx.font='700 12px system-ui';ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText('⚠ היד בקצה המצלמה',h.sx,h.sy-28);}
     }
     if(h.dwellBtn&&!h.dwellDone){                     // air-click progress ring
       const tip=P[8],p=Math.min((t-h.dwellStart)/DWELL,1);
@@ -458,7 +469,7 @@ function loop(t){
     const s=performance.now();
     try{handleHands(landmarker.detectForVideo(video,s));}catch(e){}
     detectMs=detectMs*0.8+(performance.now()-s)*0.2;
-    detectGap=Math.min(Math.max(33,detectMs*2.2),150);
+    detectGap=Math.min(Math.max(33,detectMs*1.4),150);
   }
   updateHands(t);
   physics(k);
@@ -468,6 +479,9 @@ function loop(t){
   drawBalls(t);
   drawTrash();
   drawHands(t);
+  flashes=flashes.filter(f=>t-f.t<900);
+  for(const f of flashes){ctx.globalAlpha=1-(t-f.t)/900;ctx.fillStyle='#ffd23d';ctx.font='700 14px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(f.text,Math.min(Math.max(f.x,80),W-80),f.y);}
+  ctx.globalAlpha=1;
   fN++;if(t-fT>1000){fps=fN;fN=0;fT=t;fpsHist.push(fps);if(fpsHist.length>60)fpsHist.shift();
     if(landmarker)log('perf',`fps=${fps} det=${detectMs.toFixed(0)}ms hz=${Math.round(1000/detectGap)} hands=${hands.filter(h=>h.P).length}`);
     status.textContent=`FPS ${fps} | HAND ${Math.round(1000/detectGap)}/s | ${tool.toUpperCase()}`;}
@@ -496,6 +510,15 @@ document.getElementById('copylog').onclick=async()=>{
   catch(e){ta.focus();ta.select();msg.textContent='סמן הכל בתיבה, העתק, ותדביק ל-Claude.';}
 };
 document.getElementById('logclose').onclick=()=>document.getElementById('logbox').style.display='none';
+document.getElementById('twohands').onclick=async()=>{
+  TWO_HANDS=!TWO_HANDS;
+  document.getElementById('twohands').textContent=TWO_HANDS?'✌️ שתי ידיים':'☝️ יד אחת';
+  log('mode',TWO_HANDS?'2 hands':'1 hand');
+  try{await landmarker.setOptions({numHands:TWO_HANDS?2:1});}catch(e){log('modeErr',String(e).slice(0,60));}
+  forgetHand(hands[1]);
+};
+let flashes=[];
+function flash(text,x,y){flashes.push({text,x,y,t:performance.now()});}
 document.getElementById('cam').onclick=()=>{showCam=!showCam;video.style.visibility=showCam?'visible':'hidden';};
 
 let stream=null;
@@ -509,7 +532,7 @@ document.getElementById('go').onclick=async()=>{
   try{
     await openCamera();
     const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-    const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:d},runningMode:"VIDEO",numHands:2,minHandDetectionConfidence:0.6,minHandPresenceConfidence:0.5,minTrackingConfidence:0.5});
+    const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:d},runningMode:"VIDEO",numHands:1,minHandDetectionConfidence:0.6,minHandPresenceConfidence:0.5,minTrackingConfidence:0.5});
     try{landmarker=await HandLandmarker.createFromOptions(vision,opts("GPU"));}
     catch(e){landmarker=await HandLandmarker.createFromOptions(vision,opts("CPU"));}
     document.getElementById('start').style.display='none';
