@@ -84,8 +84,10 @@ const ctx=cv.getContext('2d',{alpha:true,desynchronized:true});
 const status=document.getElementById('status');
 let W,H,DPR, landmarker, showCam=true, tool='move';
 
+/* computer or phone? computers get a sharper camera, sharper drawing and bigger windows */
+const IS_PC=!/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)&&!matchMedia('(pointer:coarse)').matches;
 function resize(){
-  DPR=Math.min(devicePixelRatio||1,1.25);
+  DPR=Math.min(devicePixelRatio||1,IS_PC?1.5:1.25);
   W=innerWidth;H=innerHeight;cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);
   ctx.setTransform(DPR,0,0,DPR,0,0);
 }
@@ -184,7 +186,7 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v15';
+const VERSION='v16';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
 let CLOSE_T=0.030, OPEN_T=0.050;        // thumb-to-index distance in METRES (3D), replaced by the user's own calibration
 try{const c=JSON.parse(localStorage.getItem('jarvis_calib3d')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
@@ -202,7 +204,7 @@ class OneEuro{
     this.x+=this.a(cut,dt)*(x-this.x); return this.x;
   }
 }
-const minHandPx=()=>Math.min(W,H)*0.075;   // was a fixed 45px: ignored the hand 119 times in one session
+const minHandPx=()=>Math.min(W,H)*(IS_PC?0.045:0.075);   // at a computer you sit farther from the camera, so the hand looks smaller   // was a fixed 45px: ignored the hand 119 times in one session
 let TWO_HANDS=false;   // one hand = much faster detection on phones (skips searching for a 2nd hand)
 
 /* ---------- black-box recorder: what happened, so Claude can analyse a session ---------- */
@@ -620,7 +622,7 @@ document.getElementById('clear').onclick=()=>{shapes.forEach(s=>{if(s.kind==='yo
 document.getElementById('copylog').onclick=async()=>{
   const secs=Math.round((performance.now()-T0)/1000);
   const txt=['JARVIS LOG '+VERSION+` | 3D pinch close<${cm(CLOSE_T)} open>${cm(OPEN_T)}`,
-    `session ${secs}s | screen ${W}x${H} dpr ${devicePixelRatio} | cam ${video.videoWidth}x${video.videoHeight} | tool ${tool}`,
+    `${IS_PC?'PC':'phone'} | session ${secs}s | screen ${W}x${H} dpr ${devicePixelRatio} | cam ${video.videoWidth}x${video.videoHeight} | tool ${tool}`,
     navigator.userAgent.replace(/\(([^)]*)\)/,(m,g)=>'('+g.slice(0,60)+')').slice(0,160),
     'STATS '+JSON.stringify(STATS),
     'objects: balls='+balls.length+' shapes='+shapes.length,
@@ -646,7 +648,7 @@ let flashes=[];
 const newId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 function openApp(kind){
   const videoId=null;
-  const w=Math.min(W-70,kind==='youtube'?340:230), hh=kind==='youtube'?Math.min(H-160,380):150;
+  const w=Math.min(W-70,kind==='youtube'?(IS_PC?720:340):(IS_PC?320:230)), hh=kind==='youtube'?Math.min(H-160,IS_PC?520:380):(IS_PC?200:150);
   const win={type:'window',id:newId(),x:Math.round((W-w)/2)+20,y:Math.round(H*0.25),w,h:hh,color:'#00e5ff',kind,
     title:WIN_TITLES[kind],born:performance.now(),videoId};
   if(kind==='youtube'){win.view='grid';win.items=[];win.page=0;}
@@ -854,7 +856,7 @@ document.getElementById('cam').onclick=()=>{showCam=!showCam;video.style.visibil
 
 let stream=null;
 async function openCamera(){
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:30,max:30}},audio:false});
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:IS_PC?1280:640},height:{ideal:IS_PC?720:480},frameRate:{ideal:30,max:30}},audio:false});
   video.srcObject=stream;await video.play();updateMap();
 }
 document.getElementById('go').onclick=async()=>{
