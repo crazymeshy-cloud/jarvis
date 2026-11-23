@@ -186,7 +186,7 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v16';
+const VERSION='v17';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
 let CLOSE_T=0.030, OPEN_T=0.050;        // thumb-to-index distance in METRES (3D), replaced by the user's own calibration
 try{const c=JSON.parse(localStorage.getItem('jarvis_calib3d')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
@@ -856,7 +856,17 @@ document.getElementById('cam').onclick=()=>{showCam=!showCam;video.style.visibil
 
 let stream=null;
 async function openCamera(){
-  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:IS_PC?1280:640},height:{ideal:IS_PC?720:480},frameRate:{ideal:30,max:30}},audio:false});
+  // try the preferred settings first; if the camera refuses them, fall back to the simplest request
+  const tries=[
+    {video:{facingMode:'user',width:{ideal:IS_PC?1280:640},height:{ideal:IS_PC?720:480},frameRate:{ideal:30}},audio:false},
+    {video:{width:{ideal:640},height:{ideal:480}},audio:false},
+    {video:true,audio:false}];
+  let lastErr;
+  for(const c of tries){
+    try{stream=await navigator.mediaDevices.getUserMedia(c);break;}
+    catch(e){lastErr=e;log('camErr',e.name+' '+(e.message||'').slice(0,60)); if(e.name==='NotAllowedError')break;}
+  }
+  if(!stream)throw lastErr;
   video.srcObject=stream;await video.play();updateMap();
 }
 document.getElementById('go').onclick=async()=>{
@@ -876,7 +886,10 @@ document.getElementById('go').onclick=async()=>{
     document.getElementById('bar').style.display='flex';
   }catch(e){
     btn.textContent='הפעל מערכת';btn.disabled=false;
-    err.textContent='לא הצלחתי לפתוח מצלמה או לטעון את זיהוי הידיים: '+(e.message||e)+' — תוודא שאישרת מצלמה ושיש אינטרנט.';
+    const why={NotAllowedError:'אין הרשאה למצלמה — לחץ על המנעול 🔒 ליד הכתובת ותאשר מצלמה',
+      NotReadableError:'המצלמה תפוסה — סגור תוכנות אחרות שמשתמשות בה (זום, וואטסאפ, מצלמה של Windows) ונסה שוב',
+      NotFoundError:'לא נמצאה מצלמה במחשב',OverconstrainedError:'המצלמה לא תומכת בהגדרות'}[e&&e.name];
+    err.textContent=(why||'לא הצלחתי לפתוח מצלמה או לטעון את זיהוי הידיים')+'  ['+((e&&e.name)||'')+': '+((e&&e.message)||e)+']';
   }
 };
 document.addEventListener('visibilitychange',async()=>{
