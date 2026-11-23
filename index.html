@@ -5,20 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>JARVIS — שליטה בידיים</title>
 <style>
-  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,sans-serif;color:#9ff}
-  video{display:none}
-  canvas{position:fixed;inset:0;width:100%;height:100%}
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,sans-serif;color:#9ff;touch-action:none}
+  /* video shown by the browser itself (GPU-composited) instead of being redrawn on the canvas every frame */
+  video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);z-index:0}
+  #shade{position:fixed;inset:0;z-index:1;pointer-events:none;
+    background-color:rgba(0,10,20,.55);
+    background-image:linear-gradient(rgba(0,255,255,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,255,.06) 1px,transparent 1px);
+    background-size:50px 50px}
+  canvas{position:fixed;inset:0;width:100%;height:100%;z-index:2}
   #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:radial-gradient(circle at center,#012 0%,#000 70%);z-index:5;text-align:center;padding:20px}
   #start h1{margin:0;font-size:42px;letter-spacing:8px;color:#5ff;text-shadow:0 0 18px #0ff}
   #start p{margin:0;color:#8cc;max-width:420px;line-height:1.6}
-  button{font:inherit;font-weight:700;border:1px solid #0ff;background:rgba(0,255,255,.1);color:#aff;border-radius:10px;padding:12px 26px;font-size:18px;cursor:pointer;box-shadow:0 0 12px rgba(0,255,255,.4)}
+  button{font:inherit;font-weight:700;border:1px solid #0ff;background:rgba(0,255,255,.1);color:#aff;border-radius:10px;padding:12px 26px;font-size:18px;cursor:pointer}
   #bar{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);display:none;gap:10px;z-index:4}
-  #bar button{font-size:15px;padding:8px 16px}
-  #status{position:fixed;top:12px;left:12px;z-index:4;font:600 13px ui-monospace,monospace;color:#6ff;direction:ltr;text-shadow:0 0 6px #0ff}
+  #bar button{font-size:15px;padding:8px 14px}
+  #status{position:fixed;top:12px;left:12px;z-index:4;font:600 12px ui-monospace,monospace;color:#6ff;direction:ltr}
 </style>
 </head>
 <body>
 <video id="video" playsinline autoplay muted></video>
+<div id="shade"></div>
 <canvas id="c"></canvas>
 <div id="status"></div>
 
@@ -32,79 +38,86 @@
 <div id="bar">
   <button id="add">➕ כדור</button>
   <button id="reset">↺ איפוס</button>
-  <button id="cam">📷 הסתר/הצג מצלמה</button>
+  <button id="cam">📷</button>
 </div>
 
 <script type="module">
 import {FilesetResolver, HandLandmarker} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
-const video=document.getElementById('video'), cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const video=document.getElementById('video'), cv=document.getElementById('c');
+const ctx=cv.getContext('2d',{alpha:true,desynchronized:true});
 const status=document.getElementById('status');
 let W,H,DPR, landmarker, showCam=true;
 
-function resize(){DPR=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);}
-addEventListener('resize',resize);resize();
+/* lower canvas resolution on phones = far fewer pixels to paint */
+function resize(){
+  DPR=Math.min(devicePixelRatio||1,1.25);
+  W=innerWidth;H=innerHeight;cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+addEventListener('resize',()=>{resize();balls.forEach(clampBall);});
+resize();
 
-/* ---------- balls ---------- */
+/* ---------- balls: glow is pre-rendered ONCE into a sprite (shadowBlur every frame kills mobile FPS) ---------- */
 const COLORS=['#00f0ff','#ff3d7f','#ffd23d','#7dff6b','#b47dff','#ff8a3d'];
+const spriteCache=new Map();
+function sprite(color,r){
+  const key=color+'|'+Math.round(r);
+  if(spriteCache.has(key))return spriteCache.get(key);
+  const pad=r*0.7, size=Math.ceil((r+pad)*2*DPR);
+  const c=document.createElement('canvas');c.width=c.height=size;
+  const g=c.getContext('2d');g.scale(DPR,DPR);
+  const cx=r+pad;
+  const halo=g.createRadialGradient(cx,cx,r*0.8,cx,cx,r+pad);
+  halo.addColorStop(0,color+'88');halo.addColorStop(1,color+'00');
+  g.fillStyle=halo;g.beginPath();g.arc(cx,cx,r+pad,0,Math.PI*2);g.fill();
+  const gr=g.createRadialGradient(cx-r*.3,cx-r*.3,r*.1,cx,cx,r);
+  gr.addColorStop(0,'#fff');gr.addColorStop(0.25,color);gr.addColorStop(1,'#000a');
+  g.fillStyle=gr;g.beginPath();g.arc(cx,cx,r,0,Math.PI*2);g.fill();
+  const s={c,half:r+pad};spriteCache.set(key,s);return s;
+}
 let balls=[];
 function makeBall(i){
-  const r=Math.min(W,H)*(0.05+Math.random()*0.03);
+  const r=Math.round(Math.min(W,H)*(0.06+Math.random()*0.03));
   return {x:W*(0.2+Math.random()*0.6),y:H*(0.2+Math.random()*0.5),vx:(Math.random()-.5)*4,vy:(Math.random()-.5)*4,r,
           color:COLORS[i%COLORS.length],held:null,phase:Math.random()*6};
 }
+function clampBall(b){b.x=Math.min(Math.max(b.x,b.r),W-b.r);b.y=Math.min(Math.max(b.y,b.r),H-b.r);}
 function reset(){balls=[];for(let i=0;i<6;i++)balls.push(makeBall(i));}
 reset();
 
 /* ---------- hands ---------- */
-const hands=[{},{}]; // per-hand state: pinching, ball, history
+const hands=[{},{}];
 const CONN=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
-
-function mapPt(lm){
-  const vw=video.videoWidth,vh=video.videoHeight,s=Math.max(W/vw,H/vh);
-  const ox=(W-vw*s)/2, oy=(H-vh*s)/2;
-  return {x:W-(lm.x*vw*s+ox), y:lm.y*vh*s+oy};   // mirrored
+let map={s:1,ox:0,oy:0,vw:1,vh:1};
+function updateMap(){
+  const vw=video.videoWidth||1,vh=video.videoHeight||1,s=Math.max(W/vw,H/vh);
+  map={s,ox:(W-vw*s)/2,oy:(H-vh*s)/2,vw,vh};
 }
+const mapPt=lm=>({x:W-(lm.x*map.vw*map.s+map.ox), y:lm.y*map.vh*map.s+map.oy});
 const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 
 function handleHands(res){
+  updateMap();
   const seen=new Set();
   (res.landmarks||[]).forEach((lms,hi)=>{
     if(hi>1)return; seen.add(hi);
     const P=lms.map(mapPt), h=hands[hi];
     const size=dist(P[0],P[9])||1;
     const pinchD=dist(P[4],P[8])/size;
-    const pinch={x:(P[4].x+P[8].x)/2,y:(P[4].y+P[8].y)/2};
-    h.P=P; h.pinchPt=pinch;
-    // smoothing
-    h.sx=h.sx==null?pinch.x:h.sx*0.5+pinch.x*0.5;
-    h.sy=h.sy==null?pinch.y:h.sy*0.5+pinch.y*0.5;
-    const now=performance.now();
-    h.hist=(h.hist||[]).concat([{x:h.sx,y:h.sy,t:now}]).filter(p=>now-p.t<120);
-
+    h.target={x:(P[4].x+P[8].x)/2,y:(P[4].y+P[8].y)/2};
+    h.P=P; h.lastSeen=performance.now();
+    if(h.sx==null){h.sx=h.target.x;h.sy=h.target.y;}
     if(!h.pinching && pinchD<0.32){
       h.pinching=true;
-      // grab nearest free ball
       let best=null,bd=1e9;
       for(const b of balls){ if(b.held!=null)continue; const d=Math.hypot(b.x-h.sx,b.y-h.sy); if(d<b.r*1.8&&d<bd){bd=d;best=b;} }
       if(best){best.held=hi;h.ball=best;h.offX=best.x-h.sx;h.offY=best.y-h.sy;}
     } else if(h.pinching && pinchD>0.48){
       release(h);
     }
-    if(h.ball){
-      const b=h.ball; const tx=h.sx+h.offX*0.8, ty=h.sy+h.offY*0.8;
-      b.vx=(tx-b.x); b.vy=(ty-b.y); b.x=tx; b.y=ty; h.offX*=0.8; h.offY*=0.8;
-    }
-    // fingertip push (index tip)
-    if(!h.ball){
-      const tip=P[8];
-      for(const b of balls){ if(b.held!=null)continue;
-        const d=Math.hypot(b.x-tip.x,b.y-tip.y), min=b.r+10;
-        if(d<min&&d>0){const nx=(b.x-tip.x)/d,ny=(b.y-tip.y)/d; b.x=tip.x+nx*min; b.y=tip.y+ny*min; b.vx+=nx*6; b.vy+=ny*6;}
-      }
-    }
   });
-  [0,1].forEach(i=>{ if(!seen.has(i)){ release(hands[i]); hands[i].P=null; hands[i].sx=null; hands[i].hist=[]; } });
+  [0,1].forEach(i=>{ if(!seen.has(i)){ const h=hands[i]; release(h); h.P=null; h.sx=null; h.target=null; h.hist=[]; } });
 }
 function release(h){
   if(h.ball){
@@ -115,94 +128,120 @@ function release(h){
   h.ball=null;h.pinching=false;
 }
 
-/* ---------- physics ---------- */
-function physics(){
+/* runs every render frame: glides the cursor toward the last detected position,
+   so motion stays smooth even when hand detection runs slower than the screen */
+function updateHands(now){
+  hands.forEach((h,hi)=>{
+    if(!h.target)return;
+    h.sx+= (h.target.x-h.sx)*0.45; h.sy+=(h.target.y-h.sy)*0.45;
+    h.hist=(h.hist||[]);h.hist.push({x:h.sx,y:h.sy,t:now});
+    while(h.hist.length&&now-h.hist[0].t>120)h.hist.shift();
+    if(h.ball){
+      const b=h.ball; const tx=h.sx+h.offX, ty=h.sy+h.offY;
+      b.vx=tx-b.x; b.vy=ty-b.y; b.x=tx; b.y=ty; h.offX*=0.85; h.offY*=0.85;
+    } else if(h.P){
+      const tip=h.P[8];
+      for(const b of balls){ if(b.held!=null)continue;
+        const d=Math.hypot(b.x-tip.x,b.y-tip.y), min=b.r+10;
+        if(d<min&&d>0){const nx=(b.x-tip.x)/d,ny=(b.y-tip.y)/d; b.x=tip.x+nx*min; b.y=tip.y+ny*min; b.vx+=nx*6; b.vy+=ny*6;}
+      }
+    }
+  });
+}
+
+/* ---------- physics (time-scaled so speed is the same at 30 or 60 FPS) ---------- */
+function physics(k){
   for(const b of balls){
     if(b.held!=null)continue;
-    b.vx*=0.985;b.vy*=0.985;b.vy+=0.12;          // light gravity
-    b.x+=b.vx;b.y+=b.vy;
+    const damp=Math.pow(0.985,k);
+    b.vx*=damp;b.vy*=damp;b.vy+=0.12*k;
+    b.x+=b.vx*k;b.y+=b.vy*k;
     if(b.x<b.r){b.x=b.r;b.vx=Math.abs(b.vx)*0.8;} if(b.x>W-b.r){b.x=W-b.r;b.vx=-Math.abs(b.vx)*0.8;}
     if(b.y<b.r){b.y=b.r;b.vy=Math.abs(b.vy)*0.8;} if(b.y>H-b.r){b.y=H-b.r;b.vy=-Math.abs(b.vy)*0.7;}
   }
   for(let i=0;i<balls.length;i++)for(let j=i+1;j<balls.length;j++){
-    const a=balls[i],b=balls[j],dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),m=a.r+b.r;
+    const a=balls[i],b=balls[j],dx=b.x-a.x,dy=b.y-a.y,m=a.r+b.r;
+    if(Math.abs(dx)>m||Math.abs(dy)>m)continue;
+    const d=Math.hypot(dx,dy);
     if(d<m&&d>0){
       const nx=dx/d,ny=dy/d,o=(m-d)/2;
-      if(a.held==null){a.x-=nx*o;} if(b.held==null){b.x+=nx*o;}
-      if(a.held==null){a.y-=ny*o;} if(b.held==null){b.y+=ny*o;}
+      if(a.held==null){a.x-=nx*o;a.y-=ny*o;} if(b.held==null){b.x+=nx*o;b.y+=ny*o;}
       const rv=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;
       if(rv<0){const imp=-rv*0.9; if(a.held==null){a.vx-=imp*nx;a.vy-=imp*ny;} if(b.held==null){b.vx+=imp*nx;b.vy+=imp*ny;}}
     }
   }
 }
 
-/* ---------- drawing ---------- */
-function drawVideo(){
-  if(!showCam||!video.videoWidth){ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);return;}
-  const vw=video.videoWidth,vh=video.videoHeight,s=Math.max(W/vw,H/vh);
-  ctx.save();ctx.translate(W,0);ctx.scale(-1,1);
-  ctx.drawImage(video,(W-vw*s)/2,(H-vh*s)/2,vw*s,vh*s);ctx.restore();
-  ctx.fillStyle='rgba(0,10,20,0.55)';ctx.fillRect(0,0,W,H);
-}
-function drawGrid(t){
-  ctx.strokeStyle='rgba(0,255,255,0.06)';ctx.lineWidth=1;
-  const g=50;for(let x=(t*0.01)%g;x<W;x+=g){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
-  for(let y=0;y<H;y+=g){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
-}
-function drawBall(b,t){
-  const glow=b.held!=null?40:22;
-  ctx.save();ctx.shadowColor=b.color;ctx.shadowBlur=glow;
-  const gr=ctx.createRadialGradient(b.x-b.r*.3,b.y-b.r*.3,b.r*.1,b.x,b.y,b.r);
-  gr.addColorStop(0,'#fff');gr.addColorStop(0.25,b.color);gr.addColorStop(1,'rgba(0,0,0,0.2)');
-  ctx.fillStyle=gr;ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.fill();ctx.restore();
-  // HUD rings
-  ctx.strokeStyle=b.color;ctx.lineWidth=2;ctx.globalAlpha=0.7;
-  const rot=t*0.002+b.phase;
-  ctx.beginPath();ctx.arc(b.x,b.y,b.r*1.3,rot,rot+Math.PI*0.6);ctx.stroke();
-  ctx.beginPath();ctx.arc(b.x,b.y,b.r*1.3,rot+Math.PI,rot+Math.PI*1.6);ctx.stroke();
-  if(b.held!=null){ctx.globalAlpha=0.4;ctx.beginPath();ctx.arc(b.x,b.y,b.r*1.6+Math.sin(t*0.01)*4,0,Math.PI*2);ctx.stroke();}
+/* ---------- drawing (no shadowBlur anywhere, batched paths) ---------- */
+function drawBalls(t){
+  ctx.lineWidth=2;
+  for(const b of balls){
+    const s=sprite(b.color,b.r);
+    ctx.drawImage(s.c,b.x-s.half,b.y-s.half,s.half*2,s.half*2);
+    const rot=t*0.002+b.phase, rr=b.r*1.3;
+    ctx.strokeStyle=b.color;ctx.globalAlpha=0.7;
+    ctx.beginPath();
+    ctx.arc(b.x,b.y,rr,rot,rot+1.9);
+    ctx.moveTo(b.x+rr*Math.cos(rot+Math.PI),b.y+rr*Math.sin(rot+Math.PI));
+    ctx.arc(b.x,b.y,rr,rot+Math.PI,rot+Math.PI+1.9);
+    if(b.held!=null){const r2=b.r*1.6;ctx.moveTo(b.x+r2,b.y);ctx.arc(b.x,b.y,r2,0,Math.PI*2);}
+    ctx.stroke();
+  }
   ctx.globalAlpha=1;
 }
 function drawHands(t){
   for(const h of hands){
     if(!h.P)continue;const P=h.P;
-    ctx.save();ctx.strokeStyle='rgba(0,255,255,0.8)';ctx.lineWidth=2;ctx.shadowColor='#0ff';ctx.shadowBlur=10;
-    for(const [a,b] of CONN){ctx.beginPath();ctx.moveTo(P[a].x,P[a].y);ctx.lineTo(P[b].x,P[b].y);ctx.stroke();}
-    ctx.fillStyle='#aff';for(const p of P){ctx.beginPath();ctx.arc(p.x,p.y,3,0,Math.PI*2);ctx.fill();}
-    // pinch cursor
-    const c=h.pinchPt, on=h.pinching;
-    ctx.strokeStyle=on?'#ff3d7f':'#0ff';ctx.lineWidth=2;
-    ctx.beginPath();ctx.arc(c.x,c.y,on?10:18,0,Math.PI*2);ctx.stroke();
-    ctx.beginPath();ctx.arc(c.x,c.y,26,t*0.004,t*0.004+1.2);ctx.stroke();
-    ctx.restore();
+    ctx.strokeStyle='rgba(0,255,255,0.85)';ctx.lineWidth=3;
+    ctx.beginPath();
+    for(const [a,b] of CONN){ctx.moveTo(P[a].x,P[a].y);ctx.lineTo(P[b].x,P[b].y);}
+    ctx.stroke();
+    ctx.fillStyle='#bff';
+    for(const p of P)ctx.fillRect(p.x-2.5,p.y-2.5,5,5);
+    if(h.sx!=null){
+      ctx.strokeStyle=h.pinching?'#ff3d7f':'#0ff';ctx.lineWidth=2;
+      ctx.beginPath();ctx.arc(h.sx,h.sy,h.pinching?10:18,0,Math.PI*2);
+      ctx.moveTo(h.sx+26*Math.cos(t*0.004),h.sy+26*Math.sin(t*0.004));
+      ctx.arc(h.sx,h.sy,26,t*0.004,t*0.004+1.2);ctx.stroke();
+    }
   }
 }
 
-let lastVT=-1, fps=0, fT=performance.now(), fN=0;
+/* ---------- adaptive hand detection: if the phone is slow, detect less often ---------- */
+let lastVT=-1, lastDetect=0, detectGap=33, detectMs=0;
+let fps=0,fT=performance.now(),fN=0,lastT=performance.now();
 function loop(t){
-  if(landmarker&&video.readyState>=2&&video.currentTime!==lastVT){
-    lastVT=video.currentTime;
-    try{handleHands(landmarker.detectForVideo(video,performance.now()));}catch(e){}
+  const k=Math.min((t-lastT)/16.67,3); lastT=t;
+  if(landmarker&&video.readyState>=2&&video.currentTime!==lastVT&&t-lastDetect>=detectGap){
+    lastVT=video.currentTime; lastDetect=t;
+    const s=performance.now();
+    try{handleHands(landmarker.detectForVideo(video,s));}catch(e){}
+    detectMs=detectMs*0.8+(performance.now()-s)*0.2;
+    detectGap=Math.min(Math.max(33,detectMs*2.2),150);   // keep main thread at least ~55% free for rendering
   }
-  physics();
-  drawVideo();drawGrid(t);
-  for(const b of balls)drawBall(b,t);
+  updateHands(t);
+  physics(k);
+  ctx.clearRect(0,0,W,H);
+  drawBalls(t);
   drawHands(t);
-  fN++;if(t-fT>1000){fps=fN;fN=0;fT=t;}
-  const nH=hands.filter(h=>h.P).length;
-  status.textContent=`SYS ONLINE  |  HANDS: ${nH}  |  OBJECTS: ${balls.length}  |  ${fps} FPS`;
+  fN++;if(t-fT>1000){fps=fN;fN=0;fT=t;
+    status.textContent=`FPS ${fps} | HAND ${Math.round(1000/detectGap)}/s (${detectMs.toFixed(0)}ms) | HANDS ${hands.filter(h=>h.P).length}`;}
   requestAnimationFrame(loop);
 }
 
 /* ---------- start ---------- */
+let stream=null;
+async function openCamera(){
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:30,max:30}},audio:false});
+  video.srcObject=stream;await video.play();updateMap();
+}
 document.getElementById('go').onclick=async()=>{
   const err=document.getElementById('err'), btn=document.getElementById('go');
   btn.textContent='טוען...';btn.disabled=true;
   try{
-    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:1280},height:{ideal:720}},audio:false});
-    video.srcObject=stream;await video.play();
+    await openCamera();
     const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-    const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:d},runningMode:"VIDEO",numHands:2,minHandDetectionConfidence:0.6,minTrackingConfidence:0.5});
+    const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:d},runningMode:"VIDEO",numHands:2,minHandDetectionConfidence:0.6,minHandPresenceConfidence:0.5,minTrackingConfidence:0.5});
     try{landmarker=await HandLandmarker.createFromOptions(vision,opts("GPU"));}
     catch(e){landmarker=await HandLandmarker.createFromOptions(vision,opts("CPU"));}
     document.getElementById('start').style.display='none';
@@ -212,9 +251,15 @@ document.getElementById('go').onclick=async()=>{
     err.textContent='לא הצלחתי לפתוח מצלמה או לטעון את זיהוי הידיים: '+(e.message||e)+' — תוודא שאישרת מצלמה ושיש אינטרנט.';
   }
 };
-document.getElementById('add').onclick=()=>balls.push(makeBall(balls.length));
+/* free the camera when the tab is hidden (saves memory/heat, avoids crashes), reopen when back */
+document.addEventListener('visibilitychange',async()=>{
+  if(!landmarker)return;
+  if(document.hidden){stream&&stream.getTracks().forEach(t=>t.stop());stream=null;}
+  else{try{await openCamera();}catch(e){}}
+});
+document.getElementById('add').onclick=()=>{if(balls.length<12)balls.push(makeBall(balls.length));};
 document.getElementById('reset').onclick=reset;
-document.getElementById('cam').onclick=()=>showCam=!showCam;
+document.getElementById('cam').onclick=()=>{showCam=!showCam;video.style.visibility=showCam?'visible':'hidden';};
 requestAnimationFrame(loop);
 </script>
 </body>
