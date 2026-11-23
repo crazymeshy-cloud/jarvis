@@ -51,9 +51,9 @@
 </div>
 <div id="bar">
   <button class="air" id="add">➕ כדור</button>
-  <button class="air" id="clear">🧹 נקה</button>
-  <button class="air" id="cam">📷</button>
-  <button class="air" id="twohands">☝️ יד אחת</button>
+  <button id="clear">🧹 נקה</button>
+  <button id="cam">📷</button>
+  <button id="twohands">☝️ יד אחת</button>
   <button id="copylog">📋 לוג</button>
 </div>
 <div id="logbox" style="display:none;position:fixed;inset:10% 6%;z-index:6;background:#011;border:1px solid #0ff;border-radius:12px;padding:12px;flex-direction:column;gap:8px">
@@ -132,6 +132,16 @@ function hitTest(x,y){
   for(let i=shapes.length-1;i>=0;i--){if(!shapes[i].held&&hitShape(shapes[i],x,y))return shapes[i];}
   return null;
 }
+function grabTarget(x,y){
+  const direct=hitTest(x,y); if(direct)return direct;
+  let best=null,bd=1e9;
+  for(const b of balls){ if(b.held!=null)continue; const d=Math.hypot(b.x-x,b.y-y)-b.r; if(d<55&&d<bd){bd=d;best=b;} }
+  if(best)return best;
+  for(let i=shapes.length-1;i>=0;i--){const s=shapes[i]; if(s.held)continue;
+    if(s.type==='line'){ for(let j=1;j<s.pts.length;j++)if(segDist(x,y,s.pts[j-1],s.pts[j])<45)return s; }
+    else if(x>=s.x-35&&x<=s.x+s.w+35&&y>=s.y-35&&y<=s.y+s.h+35)return s; }
+  return null;
+}
 const trash=()=>({x:56,y:H-70,r:38});
 const overTrash=(x,y)=>{const t=trash();return Math.hypot(x-t.x,y-t.y)<t.r+20;};
 function removeObj(o){
@@ -156,7 +166,8 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const HOLD_GRAB=140, HOLD_CREATE=260, LOST_MS=650, MIN_HAND_PX=45;
+const HOLD_GRAB=140, HOLD_CREATE=260, LOST_MS=650;
+const minHandPx=()=>Math.min(W,H)*0.075;   // was a fixed 45px: ignored the hand 119 times in one session
 let TWO_HANDS=false;   // one hand = much faster detection on phones (skips searching for a 2nd hand)
 
 /* ---------- black-box recorder: what happened, so Claude can analyse a session ---------- */
@@ -186,7 +197,7 @@ function handleHands(res){
     const h=hands[slot];
     h.edge=lms[9].x<0.07||lms[9].x>0.93||lms[9].y<0.07||lms[9].y>0.93;
     const size=dist(P[0],P[9]);
-    if(size<MIN_HAND_PX){log('tooSmall');return;}       // too far / tiny → ignore
+    if(size<minHandPx()){log('tooSmall');return;}       // too far / tiny → ignore
     h.P=P; h.lastSeen=now; h.frames=(h.frames||0)+1;
     if(h.frames===1)log('hand+',slot?'B':'A');
     h.target={x:(P[4].x+P[8].x)/2,y:(P[4].y+P[8].y)/2};
@@ -209,9 +220,9 @@ function forgetHand(h){
 /* ---------- actions ---------- */
 function startAction(h){
   const x=h.sx,y=h.sy;
-  { const o=tool==='move'?hitTest(x,y):null; log('start',tool+(o?' on '+o.type:'')+` @${Math.round(x)},${Math.round(y)}`); }
+  { const o=tool==='move'?grabTarget(x,y):null; log('start',tool+(o?' on '+o.type:'')+` @${Math.round(x)},${Math.round(y)}`); }
   if(tool==='move'){
-    const o=hitTest(x,y); if(!o)return;
+    const o=grabTarget(x,y); if(!o)return;
     o.held=true;
     if(o.type==='ball'){o.held=hands.indexOf(h);}
     else {shapes=shapes.filter(s=>s!==o);shapes.push(o);}   // bring to front
@@ -262,7 +273,7 @@ function endAction(h){
 }
 
 /* ---------- air buttons: hold fingertip on a button to press it ---------- */
-const DWELL=650;
+const DWELL=800, AIR_COOLDOWN=1200;
 function buttonAt(x,y){
   for(const b of document.querySelectorAll('.air')){
     if(b.offsetParent===null)continue;
@@ -272,10 +283,10 @@ function buttonAt(x,y){
   return null;
 }
 function dwell(h,now){
-  if(!h.P||h.pinching||h.action||!h.pointing){h.dwellBtn=null;return;}
+  if(!h.P||h.pinching||h.action||!h.pointing||now<(h.airCooldownUntil||0)){h.dwellBtn=null;return;}
   const tip=h.P[8], b=buttonAt(tip.x,tip.y);
   if(b!==h.dwellBtn){h.dwellBtn=b;h.dwellStart=now;h.dwellDone=false;}
-  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;log('airClick',b.dataset.tool||b.id);b.click();}
+  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;h.airCooldownUntil=now+AIR_COOLDOWN;log('airClick',b.dataset.tool||b.id);b.click();}
 }
 
 function updateHands(now){
@@ -289,8 +300,8 @@ function updateHands(now){
     // start: pinch held long enough (shorter when grabbing something that is right there)
     h.charge=0;
     if(!h.pinching&&stable&&h.closeSince!=null&&!buttonAt(h.sx,h.sy)){
-      const need=(tool==='move'&&hitTest(h.sx,h.sy))?HOLD_GRAB:HOLD_CREATE;
-      if(tool==='move'&&!hitTest(h.sx,h.sy)){h.charge=0;}       // nothing to grab → nothing happens
+      const need=(tool==='move')?HOLD_GRAB:HOLD_CREATE;
+      if(tool==='move'&&!grabTarget(h.sx,h.sy)){h.charge=0;}       // nothing to grab → nothing happens
       else{
         h.charge=Math.min((now-h.closeSince)/need,1);
         if(h.charge>=1){h.pinching=true;h.charge=0;h.actStart=now;startAction(h);}
@@ -298,7 +309,7 @@ function updateHands(now){
     }
     if(!h.pinching&&h.closeSince==null&&h.lastCharge>0&&h.charge===0)
       log('chargeCancel',Math.round(h.lastCharge*100)+'%');
-    if(!h.pinching&&h.closeSince!=null&&tool==='move'&&!hitTest(h.sx,h.sy)&&!h.missLogged){h.missLogged=true;log('pinchOnNothing');}
+    if(!h.pinching&&h.closeSince!=null&&tool==='move'&&!grabTarget(h.sx,h.sy)&&!h.missLogged){h.missLogged=true;log('pinchOnNothing');}
     if(h.closeSince==null)h.missLogged=false;
     h.lastCharge=h.charge;
     if(h.pinching){
@@ -448,6 +459,14 @@ function drawHands(t){
       if(h.charge>0){
         ctx.strokeStyle='#0ff';ctx.lineWidth=4;ctx.beginPath();
         ctx.arc(h.sx,h.sy,22,-Math.PI/2,-Math.PI/2+h.charge*Math.PI*2);ctx.stroke();
+      }
+      if(tool==='move'&&!h.action){
+        const g=grabTarget(h.sx,h.sy);
+        if(g){ctx.setLineDash([6,5]);ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.beginPath();
+          if(g.type==='ball')ctx.arc(g.x,g.y,g.r*1.55,0,Math.PI*2);
+          else if(g.type==='line'){ctx.arc(h.sx,h.sy,30,0,Math.PI*2);}
+          else ctx.rect(g.x-8,g.y-8,g.w+16,g.h+16);
+          ctx.stroke();ctx.setLineDash([]);}
       }
       if(h.edge){ctx.fillStyle='#ffd23d';ctx.font='700 12px system-ui';ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText('⚠ היד בקצה המצלמה',h.sx,h.sy-28);}
     }
