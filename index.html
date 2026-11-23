@@ -184,7 +184,7 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v14';
+const VERSION='v15';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
 let CLOSE_T=0.030, OPEN_T=0.050;        // thumb-to-index distance in METRES (3D), replaced by the user's own calibration
 try{const c=JSON.parse(localStorage.getItem('jarvis_calib3d')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
@@ -464,7 +464,9 @@ function drawWindow(s,t){
   // title-bar buttons (point ☝️ at one and hold, or tap it)
   const btns=[];
   if(s.kind==='youtube'){const y=ytMap.get(s.id);
-    btns.push(['✕','close',()=>closeWindow(s)],[s.max?'🗗':'⛶','max',()=>toggleMax(s)],[y&&y.muted?'🔇':'🔊','mute',()=>ytCmd(s,'mute')],['⏯','play',()=>ytCmd(s,'play')],['🔗','link',()=>ytCmd(s,'link')]);}
+    btns.push(['✕','close',()=>closeWindow(s)],[s.max?'🗗':'⛶','max',()=>toggleMax(s)]);
+    if(s.view==='player')btns.push([y&&y.muted?'🔇':'🔊','mute',()=>ytCmd(s,'mute')],['⏯','play',()=>ytCmd(s,'play')],['⬅','back',()=>ytBack(s)]);
+    else btns.push(['🎤','voice',()=>ytVoice(s)],['🔍','search',()=>ytSearchPrompt(s)],['🏠','home',()=>ytHome(s)]);}
   ctx.textAlign='center';ctx.font='15px system-ui';
   btns.forEach(([icon,id,fn],i)=>{
     const bw=30,bx=s.x+s.w-(i+1)*(bw+4)-2,by=s.y+2;
@@ -475,7 +477,7 @@ function drawWindow(s,t){
   });
   ctx.textAlign='left';
   if(s.kind!=='youtube'){ctx.fillStyle='#ff3d7f';ctx.beginPath();ctx.arc(s.x+s.w-14,s.y+TB/2,5,0,Math.PI*2);ctx.fill();}
-  if(s.kind==='youtube'){ctx.restore();return;}     // the video itself is a real YouTube player under the canvas
+  if(s.kind==='youtube'){ if(s.view!=='player')drawYTGrid(s,TB); ctx.restore();return; }   // player view: a real YouTube player sits under the canvas
   const cx=s.x+s.w/2, cy=s.y+TB+(s.h-TB)/2, ch=s.h-TB;
   if(s.kind==='clock'){
     const d=new Date();
@@ -643,16 +645,13 @@ let flashes=[];
 /* ---------- desktop: apps, windows, YouTube ---------- */
 const newId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
 function openApp(kind){
-  let videoId=null;
-  if(kind==='youtube'){
-    const url=prompt('הדבק קישור של סרטון יוטיוב:','');
-    videoId=parseYT(url||''); if(!videoId){ if(url)flash('הקישור לא נראה כמו יוטיוב',W/2,H/2); return; }
-  }
-  const w=Math.min(W-70,kind==='youtube'?340:230), hh=kind==='youtube'?Math.round(w*9/16)+26:150;
+  const videoId=null;
+  const w=Math.min(W-70,kind==='youtube'?340:230), hh=kind==='youtube'?Math.min(H-160,380):150;
   const win={type:'window',id:newId(),x:Math.round((W-w)/2)+20,y:Math.round(H*0.25),w,h:hh,color:'#00e5ff',kind,
     title:WIN_TITLES[kind],born:performance.now(),videoId};
-  shapes.push(win); winCount++; buzz(20); log('openApp',kind+(videoId?' '+videoId:''));
-  if(kind==='youtube')ensureYT(win);
+  if(kind==='youtube'){win.view='grid';win.items=[];win.page=0;}
+  shapes.push(win); winCount++; buzz(20); log('openApp',kind);
+  if(kind==='youtube')ytHome(win);
 }
 function closeWindow(s){removeObj(s);buzz([20,40,20]);log('winBtn','close '+s.kind);}
 function toggleMax(s){
@@ -668,7 +667,7 @@ const ytMap=new Map(); let ytReady=false;
 window.onYouTubeIframeAPIReady=()=>{ytReady=true;log('yt','api ready');shapes.forEach(s=>{if(s.kind==='youtube')ensureYT(s);});};
 {const sc=document.createElement('script');sc.src='https://www.youtube.com/iframe_api';sc.onerror=()=>log('yt','api failed to load');document.head.appendChild(sc);}
 function ensureYT(s){
-  if(!ytReady||ytMap.has(s.id)||!s.videoId)return;
+  if(!ytReady||ytMap.has(s.id)||!s.videoId||s.view!=='player')return;
   const div=document.createElement('div');div.className='ytwrap';
   const inner=document.createElement('div');inner.id='yt_'+s.id;div.appendChild(inner);
   document.getElementById('ytLayer').appendChild(div);
@@ -688,6 +687,96 @@ function ytCmd(s,cmd){
     else if(cmd==='link'){ const id=parseYT(prompt('קישור יוטיוב חדש:','')||''); if(id){s.videoId=id;p.loadVideoById(id);} }
   }catch(e){log('yt','cmd error '+cmd);}
   buzz(10); log('ytCmd',cmd);
+}
+/* ===== JARVIS YouTube: home (popular in Israel), search by typing or voice, grid of videos ===== */
+const ytKey=()=>{try{return localStorage.getItem('jarvis_ytkey')||'';}catch(e){return '';}};
+function askKey(){
+  const k=(prompt('הדבק את מפתח ה-API של יוטיוב (נשמר רק בטלפון שלך):','')||'').trim();
+  if(k){try{localStorage.setItem('jarvis_ytkey',k);}catch(e){} log('yt','key saved');}
+  return k;
+}
+async function ytFetch(s,path){
+  let key=ytKey(); if(!key)key=askKey();
+  if(!key){s.msg='צריך מפתח API כדי לחפש ביוטיוב.\nלחץ 🏠 כדי להכניס מפתח.';return;}
+  s.loading=true;s.msg='';
+  try{
+    const r=await fetch('https://www.googleapis.com/youtube/v3/'+path+'&key='+encodeURIComponent(key));
+    const j=await r.json();
+    if(j.error){
+      const why=(j.error.errors&&j.error.errors[0]&&j.error.errors[0].reason)||j.error.message;
+      log('yt','api error '+r.status+' '+why);
+      if(/key|API_KEY|forbidden|keyInvalid/i.test(why)||r.status===400){try{localStorage.removeItem('jarvis_ytkey');}catch(e){} s.msg='המפתח לא עובד ('+why+').\nלחץ 🏠 כדי להכניס מפתח חדש.';}
+      else if(/quota/i.test(why))s.msg='נגמרו החיפושים להיום (מגבלה של יוטיוב).\nמחר זה יתאפס.';
+      else s.msg='שגיאה מיוטיוב: '+why;
+    } else {
+      s.items=(j.items||[]).map(it=>({id:typeof it.id==='string'?it.id:it.id.videoId,title:decodeHtml(it.snippet.title),
+        ch:it.snippet.channelTitle,thumb:(it.snippet.thumbnails.medium||it.snippet.thumbnails.default).url})).filter(x=>x.id);
+      s.page=0; if(!s.items.length)s.msg='לא נמצאו סרטונים';
+      log('yt',`loaded ${s.items.length} videos`);
+    }
+  }catch(e){log('yt','network error');s.msg='אין חיבור ליוטיוב';}
+  s.loading=false;
+}
+const decodeHtml=t=>{const d=document.createElement('textarea');d.innerHTML=t;return d.value;};
+function ytHome(s){ytBack(s,true);s.title='YOUTUBE · פופולרי';ytFetch(s,'videos?part=snippet&chart=mostPopular&regionCode=IL&maxResults=24');}
+function ytSearch(s,q){
+  if(!q)return; ytBack(s,true); s.title='🔍 '+q;
+  log('ytSearch',q.slice(0,40));
+  ytFetch(s,'search?part=snippet&type=video&videoEmbeddable=true&maxResults=24&q='+encodeURIComponent(q));
+}
+function ytSearchPrompt(s){ytSearch(s,(prompt('מה לחפש ביוטיוב?','')||'').trim());}
+function ytVoice(s){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){flash('הדפדפן לא תומך בחיפוש קולי',s.x+s.w/2,s.y+60);return;}
+  try{
+    const rec=new SR(); rec.lang='he-IL'; rec.interimResults=false; rec.maxAlternatives=1;
+    s.msg='🎤 מקשיב... תגיד מה לחפש'; s.items=[]; buzz(20);
+    rec.onresult=e=>{const q=e.results[0][0].transcript; log('ytVoice',q.slice(0,40)); ytSearch(s,q);};
+    rec.onerror=e=>{s.msg='לא שמעתי ('+e.error+'). נסה שוב או לחץ 🔍';log('ytVoice','error '+e.error);};
+    rec.onend=()=>{ if(s.msg&&s.msg.startsWith('🎤'))s.msg='לא שמעתי כלום. לחץ 🎤 שוב'; };
+    rec.start();
+  }catch(e){s.msg='החיפוש הקולי לא הצליח להתחיל';}
+}
+function ytPlay(s,item){
+  s.videoId=item.id; s.view='player'; s.title='▶ '+item.title; buzz(20); log('ytPlay',item.id);
+  ensureYT(s);
+}
+function ytBack(s,silent){ destroyYT(s); s.view='grid'; if(!silent){s.title='YOUTUBE';buzz(10);log('ytCmd','back');} }
+const thumbCache=new Map();
+function thumb(url){
+  let im=thumbCache.get(url); if(!im){im=new Image();im.src=url;thumbCache.set(url,im);} return im.complete&&im.naturalWidth?im:null;
+}
+function fitText(t,maxW){ if(ctx.measureText(t).width<=maxW)return t; while(t.length>1&&ctx.measureText(t+'…').width>maxW)t=t.slice(0,-1); return t+'…'; }
+function drawYTGrid(s,TB){
+  const x0=s.x+6, y0=s.y+TB+6, aw=s.w-12, ah=s.h-TB-12;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  if(s.loading||s.msg||!(s.items&&s.items.length)){
+    ctx.fillStyle='#bff';ctx.font='600 14px system-ui';
+    const lines=(s.loading?'טוען...':(s.msg||'')).split('\n');
+    lines.forEach((l,i)=>ctx.fillText(l,s.x+s.w/2,s.y+TB+ah/2+(i-(lines.length-1)/2)*20));
+    return;
+  }
+  const cols=Math.max(1,Math.floor(aw/150)), gap=6, cw=(aw-(cols-1)*gap)/cols, th=cw*9/16, ch=th+30;
+  const rows=Math.max(1,Math.floor((ah-26)/(ch+gap))), per=cols*rows, pages=Math.ceil(s.items.length/per);
+  s.page=Math.min(s.page||0,pages-1);
+  s.items.slice(s.page*per,s.page*per+per).forEach((it,i)=>{
+    const cx=x0+(i%cols)*(cw+gap), cy=y0+Math.floor(i/cols)*(ch+gap);
+    const im=thumb(it.thumb);
+    if(im)ctx.drawImage(im,cx,cy,cw,th); else {ctx.fillStyle='#012';ctx.fillRect(cx,cy,cw,th);}
+    ctx.strokeStyle='rgba(0,229,255,.5)';ctx.lineWidth=1;ctx.strokeRect(cx,cy,cw,th);
+    ctx.fillStyle='#fff';ctx.font='600 11px system-ui';ctx.textAlign='right';
+    ctx.fillText(fitText(it.title,cw-4),cx+cw-2,cy+th+9);
+    ctx.fillStyle='#8cc';ctx.font='10px system-ui';ctx.fillText(fitText(it.ch||'',cw-4),cx+cw-2,cy+th+22);
+    hotspots.push({x:cx,y:cy,w:cw,h:th+26,id:'yt:video',dataset:{},click:()=>ytPlay(s,it)});
+  });
+  if(pages>1){
+    const by=s.y+s.h-24; ctx.textAlign='center';ctx.font='15px system-ui';
+    [['◀',-1,s.x+s.w/2-70],['▶',1,s.x+s.w/2+40]].forEach(([ic,d,bx])=>{
+      ctx.fillStyle='rgba(0,229,255,.2)';ctx.fillRect(bx,by,30,20);ctx.fillStyle='#fff';ctx.fillText(ic,bx+15,by+11);
+      hotspots.push({x:bx,y:by,w:30,h:20,id:'yt:page',dataset:{},click:()=>{s.page=(s.page+d+pages)%pages;buzz(8);}});
+    });
+    ctx.fillStyle='#9ff';ctx.font='11px system-ui';ctx.fillText(`${s.page+1}/${pages}`,s.x+s.w/2-5,by+11);
+  }
 }
 function syncYT(){
   const TB=26;
@@ -746,13 +835,14 @@ const calib={step:0,open:[],closed:[],need:14,
 function saveScene(){
   try{localStorage.setItem('jarvis_scene',JSON.stringify({
     balls:balls.map(b=>({x:b.x,y:b.y,r:b.r,color:b.color,phase:b.phase})),
-    shapes:shapes.map(s=>{const c={...s};delete c.held;delete c.born;delete c.max;return c;})}));}catch(e){}
+    shapes:shapes.map(s=>{const c={...s};delete c.held;delete c.born;delete c.max;delete c.loading;delete c.msg;return c;})}));}catch(e){}
 }
 function loadScene(){
   try{const d=JSON.parse(localStorage.getItem('jarvis_scene')||'null'); if(!d)return;
     balls=(d.balls||[]).map(b=>({...b,type:'ball',vx:0,vy:0,held:null}));
     shapes=(d.shapes||[]).map(s=>s.type==='window'?{...s,born:0,id:s.id||newId()}:s);
     if(typeof ytReady!=='undefined'&&ytReady)shapes.forEach(s=>{if(s.kind==='youtube')ensureYT(s);});
+    shapes.forEach(s=>{if(s.kind==='youtube'){if(!s.view)s.view=s.videoId?'player':'grid'; if(s.view==='grid'&&!(s.items&&s.items.length))setTimeout(()=>ytHome(s),500);}});
     winCount=shapes.filter(s=>s.type==='window').length;
     log('loaded',`${balls.length} balls, ${shapes.length} shapes`);
   }catch(e){}
