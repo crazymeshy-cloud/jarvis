@@ -37,7 +37,10 @@
   תנועות סתמיות של היד לא עושות כלום.<br><br>
   ✋ <b>הזזה</b> — צובטים על כדור / ריבוע / חלון / קו ומזיזים. זורקים לפח 🗑 כדי למחוק.<br>
   ✏️ <b>קו</b> — צובטים ומזיזים כדי לצייר.<br>
-  ⬜ <b>ריבוע</b> ו־🪟 <b>חלון</b> — צובטים בפינה אחת, גוררים ומשחררים.
+  ⬜ <b>ריבוע</b> ו־🪟 <b>חלון</b> — צובטים בפינה אחת, גוררים ומשחררים.<br>
+  🗑 <b>מחיקה</b> — צובטים על משהו ומחזיקים עד שהעיגול האדום מתמלא.<br><br>
+  ✅ נחשב צביטה: 👌 🤏 🫰 (אגודל נוגע בקצה האצבע המורה)<br>
+  ⛔ לא נחשב: 👊 🫵 👎 — מעל היד תמיד רואים מה זוהה.
   </p>
   <button id="go">הפעל מערכת</button>
   <p id="err" style="color:#f88"></p>
@@ -48,12 +51,15 @@
   <button class="air" data-tool="draw">✏️</button>
   <button class="air" data-tool="rect">⬜</button>
   <button class="air" data-tool="window">🪟</button>
+  <button class="air" data-tool="del">🗑</button>
 </div>
 <div id="bar">
   <button class="air" id="add">➕ כדור</button>
   <button id="clear">🧹 נקה</button>
   <button id="cam">📷</button>
   <button id="twohands">☝️ יד אחת</button>
+  <button id="star">⭐</button>
+  <button id="calib">🎯</button>
   <button id="copylog">📋 לוג</button>
 </div>
 <div id="logbox" style="display:none;position:fixed;inset:10% 6%;z-index:6;background:#011;border:1px solid #0ff;border-radius:12px;padding:12px;flex-direction:column;gap:8px">
@@ -166,7 +172,24 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const HOLD_GRAB=140, HOLD_CREATE=220, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
+const VERSION='v8';
+const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
+let CLOSE_T=0.34, OPEN_T=0.50;          // pinch thresholds — replaced by the user's own calibration
+try{const c=JSON.parse(localStorage.getItem('jarvis_calib')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
+const buzz=p=>{try{navigator.vibrate&&navigator.vibrate(p);}catch(e){}};
+let lastIgnored={why:'',t:0}, jitSum=0, jitN=0;
+/* One Euro filter: steady when the hand is still, no lag when it moves fast */
+class OneEuro{
+  constructor(minCut=1.3,beta=0.015,dCut=1){this.minCut=minCut;this.beta=beta;this.dCut=dCut;this.x=null;}
+  a(cut,dt){const tau=1/(2*Math.PI*cut);return 1/(1+tau/dt);}
+  f(x,t){
+    if(this.x==null){this.x=x;this.dx=0;this.t=t;return x;}
+    const dt=Math.max((t-this.t)/1000,1e-3);this.t=t;
+    const dx=(x-this.x)/dt; this.dx+=this.a(this.dCut,dt)*(dx-this.dx);
+    const cut=this.minCut+this.beta*Math.abs(this.dx);
+    this.x+=this.a(cut,dt)*(x-this.x); return this.x;
+  }
+}
 const minHandPx=()=>Math.min(W,H)*0.075;   // was a fixed 45px: ignored the hand 119 times in one session
 let TWO_HANDS=false;   // one hand = much faster detection on phones (skips searching for a 2nd hand)
 
@@ -174,7 +197,7 @@ let TWO_HANDS=false;   // one hand = much faster detection on phones (skips sear
 const T0=performance.now(), LOG=[], STATS={};
 function log(ev,data){
   STATS[ev]=(STATS[ev]||0)+1;
-  if(ev==='lowScore'||ev==='tooSmall')return;          // counted only, too frequent to list
+  if(ev==='lowScore'||ev==='tooSmall'){lastIgnored={why:ev,t:performance.now()};return;}   // counted only, too frequent to list
   LOG.push([Math.round((performance.now()-T0)/100)/10,ev,data??'']);
   if(LOG.length>700)LOG.shift();
 }
@@ -200,38 +223,63 @@ function handleHands(res){
     if(size<minHandPx()){log('tooSmall');return;}       // too far / tiny → ignore
     h.P=P; h.lastSeen=now; h.frames=(h.frames||0)+1;
     if(h.frames===1)log('hand+',slot?'B':'A');
-    h.target={x:(P[4].x+P[8].x)/2,y:(P[4].y+P[8].y)/2};
+    const rx=(P[4].x+P[8].x)/2, ry=(P[4].y+P[8].y)/2;
+    h.fx=h.fx||new OneEuro(); h.fy=h.fy||new OneEuro();
+    h.target={x:h.fx.f(rx,now),y:h.fy.f(ry,now)};
+    jitSum+=Math.hypot(rx-h.target.x,ry-h.target.y); jitN++;
     if(h.sx==null){h.sx=h.target.x;h.sy=h.target.y;}
     h.pointing=extended(P,8,6)&&!extended(P,12,10)&&!extended(P,16,14)&&!extended(P,20,18);
     const pinchD=dist(P[4],P[8])/size;
     h.pinchD=pinchD;
-    if(pinchD<0.34){ h.openSince=null; if(h.closeSince==null){h.closeSince=now;log('pinchDown',(slot?'B':'A')+(h.pinching?' (already)':''));} }
-    else if(pinchD>0.50){ if(h.openSince==null)h.openSince=now; if(now-h.openSince>=OPEN_MS)h.closeSince=null; }   // cancel only when CLEARLY open for a moment
+    if(calib.step){calib.sample(pinchD);return;}
+    /* ONLY real pinches count (👌 🤏 🫰): thumb tip on the index TIP, with the index finger not folded
+       into the palm. A fist 👊, thumb-down 👎 or finger pointed at the camera 🫵 can bring thumb and
+       index close in the picture, but the index is folded/foreshortened → blocked. */
+    const idxFolded=dist(P[8],P[5])<0.42*size;
+    const thumbInPalm=dist(P[4],P[9])<0.30*size;
+    const closeLike=pinchD<CLOSE_T, valid=!idxFolded&&!thumbInPalm;
+    h.pose=closeLike?(valid?'pinch':'blocked'):(h.pointing?'point':'open');
+    if(closeLike&&valid){
+      h.openSince=null;
+      if(h.closeSince==null){h.closeSince=now;log('pinchDown',`${slot?'B':'A'} d=${pinchD.toFixed(2)}`+(h.pinching?' (already)':''));}
+    } else if(closeLike&&!valid){
+      if(!h.pinching&&h.closeSince!=null)h.closeSince=null;       // fist etc. never starts anything
+      if(!h.blockLogged){h.blockLogged=true;log('blockedPose',`d=${pinchD.toFixed(2)} idx=${(dist(P[8],P[5])/size).toFixed(2)} thumb=${(dist(P[4],P[9])/size).toFixed(2)}`);}
+    } else if(pinchD>OPEN_T){
+      h.blockLogged=false;
+      if(h.openSince==null)h.openSince=now; if(now-h.openSince>=OPEN_MS)h.closeSince=null;   // cancel only when CLEARLY open for a moment
+    }
     // in-between values are noise: they neither start nor cancel anything
   });
 }
 function forgetHand(h){
-  log('hand-',(hands.indexOf(h)?'B':'A')+(h.action?' while '+h.action.kind:''));
+  const now=performance.now();
+  const why=h.edge?'edge':(now-lastIgnored.t<500?lastIgnored.why:'notDetected');
+  log('hand-',(hands.indexOf(h)?'B':'A')+' why='+why+(h.action?' while '+h.action.kind:''));
   if(h.action)h.endReason='lost';
   endAction(h);
-  Object.assign(h,{pinching:false,P:null,sx:null,target:null,hist:[],dwellBtn:null,frames:0,closeSince:null,openSince:null,pointing:false});
+  Object.assign(h,{pinching:false,P:null,sx:null,target:null,hist:[],dwellBtn:null,frames:0,closeSince:null,openSince:null,pointing:false,fx:null,fy:null,pose:null});
 }
 
 /* ---------- actions ---------- */
 function startAction(h){
   const x=h.sx,y=h.sy;
-  { const o=tool==='move'?grabTarget(x,y):null; log('start',tool+(o?' on '+o.type:'')+` @${Math.round(x)},${Math.round(y)}`); }
-  if(tool==='move'){
+  { const o=(tool==='move'||tool==='del')?grabTarget(x,y):null; log('start',tool+(o?' on '+o.type:'')+` @${Math.round(x)},${Math.round(y)}`); }
+  if(tool==='del'){
     const o=grabTarget(x,y); if(!o)return;
+    removeObj(o); buzz([20,40,20]); flash('נמחק',x,y-30); log('delete',o.type); return;
+  }
+  if(tool==='move'){
+    const o=grabTarget(x,y); if(!o)return; buzz(15);
     o.held=true;
     if(o.type==='ball'){o.held=hands.indexOf(h);}
     else {shapes=shapes.filter(s=>s!==o);shapes.push(o);}   // bring to front
     h.action={kind:'grab',obj:o,lx:x,ly:y,sx0:x,sy0:y,t0:performance.now()};
   } else if(tool==='draw'){
     const line={type:'line',pts:[{x,y}],color:nextColor()};
-    shapes.push(line); h.action={kind:'draw',line};
+    shapes.push(line); h.action={kind:'draw',line}; buzz(10);
   } else {
-    h.action={kind:'box',type:tool,x0:x,y0:y,x1:x,y1:y,color:nextColor()};
+    h.action={kind:'box',type:tool,x0:x,y0:y,x1:x,y1:y,color:nextColor()}; buzz(10);
   }
 }
 function moveAction(h){
@@ -248,12 +296,13 @@ function endAction(h){
   const a=h.action; if(!a)return; h.action=null;
   { const dur=h.actStart?Math.round(performance.now()-h.actStart):0;
     const extra=a.kind==='box'?` ${Math.round(Math.abs(a.x1-a.x0))}x${Math.round(Math.abs(a.y1-a.y0))}`:a.kind==='draw'?` ${a.line.pts.length}pts`:` ${a.obj.type}`;
-    log('end',a.kind+extra+` ${dur}ms reason=${h.endReason||'open'}${a.kind==='grab'&&overTrash(h.sx??0,h.sy??0)?(performance.now()-a.t0>400&&Math.hypot((h.sx??0)-a.sx0,(h.sy??0)-a.sy0)>60?' →TRASH':' (near bin, kept)'):''}`);
+    log('end',a.kind+extra+` ${dur}ms reason=${h.endReason||'open'}${a.kind==='grab'&&overTrash(h.sx??0,h.sy??0)?(performance.now()-a.t0>350?' →TRASH':' (near bin, kept)'):''}`);
     h.endReason=null; }
   if(a.kind==='grab'){
     const o=a.obj;
-    const carried=performance.now()-a.t0>400&&Math.hypot((h.sx??0)-a.sx0,(h.sy??0)-a.sy0)>60;
-    if(carried&&overTrash(h.sx??0,h.sy??0)){removeObj(o);return;}
+    const carried=performance.now()-a.t0>350;
+    if(carried&&overTrash(h.sx??0,h.sy??0)){removeObj(o);buzz([20,40,20]);return;}
+    buzz(12);
     if(o.type==='ball'){
       const hs=h.hist||[];
       if(hs.length>1){const p=hs[0],z=hs[hs.length-1],dt=Math.max(16,z.t-p.t);o.vx=(z.x-p.x)/dt*16;o.vy=(z.y-p.y)/dt*16;}
@@ -265,6 +314,7 @@ function endAction(h){
   } else if(a.kind==='box'){
     const x=Math.min(a.x0,a.x1),y=Math.min(a.y0,a.y1),w=Math.abs(a.x1-a.x0),hh=Math.abs(a.y1-a.y0);
     if(w<30||hh<25){log('tooSmallShape',`${Math.round(w)}x${Math.round(hh)}`);flash('קטן מדי — תגרור יותר',a.x0,a.y0);return;}
+    buzz(20);
     if(a.type==='rect')shapes.push({type:'rect',x,y,w,h:hh,color:a.color});
     else{
       const kind=WIN_KINDS[winCount%WIN_KINDS.length];winCount++;
@@ -287,30 +337,32 @@ function dwell(h,now){
   if(!h.P||h.pinching||h.action||!h.pointing||now<(h.airCooldownUntil||0)){h.dwellBtn=null;return;}
   const tip=h.P[8], b=buttonAt(tip.x,tip.y);
   if(b!==h.dwellBtn){h.dwellBtn=b;h.dwellStart=now;h.dwellDone=false;}
-  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;h.airCooldownUntil=now+AIR_COOLDOWN;log('airClick',b.dataset.tool||b.id);b.click();}
+  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;h.airCooldownUntil=now+AIR_COOLDOWN;log('airClick',b.dataset.tool||b.id);buzz(8);b.click();}
 }
 
 function updateHands(now){
   hands.forEach(h=>{
     if(!h.target)return;
     if(now-h.lastSeen>LOST_MS){forgetHand(h);return;}
-    h.sx+=(h.target.x-h.sx)*0.45; h.sy+=(h.target.y-h.sy)*0.45;
+    h.sx+=(h.target.x-h.sx)*0.5; h.sy+=(h.target.y-h.sy)*0.5;
+    if(calib.step)return;
     h.hist=(h.hist||[]);h.hist.push({x:h.sx,y:h.sy,t:now});
     while(h.hist.length&&now-h.hist[0].t>120)h.hist.shift();
     const stable=h.frames>=3;
     // start: pinch held long enough (shorter when grabbing something that is right there)
     h.charge=0;
     if(!h.pinching&&stable&&h.closeSince!=null&&now>=(h.rearmAt||0)&&h.openSince==null&&!buttonAt(h.sx,h.sy)){
-      const need=(tool==='move')?HOLD_GRAB:HOLD_CREATE;
-      if(tool==='move'&&!grabTarget(h.sx,h.sy)){h.charge=0;}       // nothing to grab → nothing happens
+      const needsTarget=tool==='move'||tool==='del';
+      const need=tool==='move'?HOLD_GRAB:tool==='del'?HOLD_DELETE:HOLD_CREATE;
+      if(needsTarget&&!grabTarget(h.sx,h.sy)){h.charge=0;}       // nothing to grab/delete → nothing happens
       else{
         h.charge=Math.min((now-h.closeSince)/need,1);
         if(h.charge>=1){h.pinching=true;h.charge=0;h.actStart=now;startAction(h);}
       }
     }
     if(!h.pinching&&h.closeSince==null&&h.lastCharge>0&&h.charge===0)
-      log('chargeCancel',Math.round(h.lastCharge*100)+'%');
-    if(!h.pinching&&h.closeSince!=null&&tool==='move'&&!grabTarget(h.sx,h.sy)&&!h.missLogged){h.missLogged=true;log('pinchOnNothing');}
+      log('chargeCancel',Math.round(h.lastCharge*100)+'% d='+(h.pinchD||0).toFixed(2));
+    if(!h.pinching&&h.closeSince!=null&&(tool==='move'||tool==='del')&&!grabTarget(h.sx,h.sy)&&!h.missLogged){h.missLogged=true;log('pinchOnNothing');}
     if(h.closeSince==null)h.missLogged=false;
     h.lastCharge=h.charge;
     if(h.pinching){
@@ -458,17 +510,20 @@ function drawHands(t){
       ctx.strokeStyle=h.pinching?'#ff3d7f':'rgba(160,200,210,.6)';ctx.lineWidth=2;
       ctx.beginPath();ctx.arc(h.sx,h.sy,h.pinching?10:16,0,Math.PI*2);ctx.stroke();
       if(h.charge>0){
-        ctx.strokeStyle='#0ff';ctx.lineWidth=4;ctx.beginPath();
+        ctx.strokeStyle=tool==='del'?'#ff3d5a':'#0ff';ctx.lineWidth=4;ctx.beginPath();
         ctx.arc(h.sx,h.sy,22,-Math.PI/2,-Math.PI/2+h.charge*Math.PI*2);ctx.stroke();
       }
-      if(tool==='move'&&!h.action){
+      if((tool==='move'||tool==='del')&&!h.action){
         const g=grabTarget(h.sx,h.sy);
-        if(g){ctx.setLineDash([6,5]);ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.beginPath();
+        if(g){ctx.setLineDash([6,5]);ctx.strokeStyle=tool==='del'?'#ff3d5a':'#fff';ctx.lineWidth=2;ctx.beginPath();
           if(g.type==='ball')ctx.arc(g.x,g.y,g.r*1.55,0,Math.PI*2);
           else if(g.type==='line'){ctx.arc(h.sx,h.sy,30,0,Math.PI*2);}
           else ctx.rect(g.x-8,g.y-8,g.w+16,g.h+16);
           ctx.stroke();ctx.setLineDash([]);}
       }
+      { const lab={pinch:'🤏 צביטה',blocked:'⛔ לא צביטה',point:'☝️ הצבעה',open:'✋'}[h.pose]||'';
+        if(lab){ctx.font='700 13px system-ui';ctx.textAlign='center';ctx.textBaseline='top';
+          ctx.fillStyle=h.pose==='blocked'?'#ff6b6b':h.pose==='pinch'?'#7dff6b':'#bff';ctx.fillText(lab,h.sx,h.sy+30);} }
       if(h.edge){ctx.fillStyle='#ffd23d';ctx.font='700 12px system-ui';ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText('⚠ היד בקצה המצלמה',h.sx,h.sy-28);}
     }
     if(h.dwellBtn&&!h.dwellDone){                     // air-click progress ring
@@ -502,8 +557,9 @@ function loop(t){
   flashes=flashes.filter(f=>t-f.t<900);
   for(const f of flashes){ctx.globalAlpha=1-(t-f.t)/900;ctx.fillStyle='#ffd23d';ctx.font='700 14px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(f.text,Math.min(Math.max(f.x,80),W-80),f.y);}
   ctx.globalAlpha=1;
+  calib.draw(t);
   fN++;if(t-fT>1000){fps=fN;fN=0;fT=t;fpsHist.push(fps);if(fpsHist.length>60)fpsHist.shift();
-    if(landmarker)log('perf',`fps=${fps} det=${detectMs.toFixed(0)}ms hz=${Math.round(1000/detectGap)} hands=${hands.filter(h=>h.P).length}`);
+    if(landmarker)log('perf',`fps=${fps} det=${detectMs.toFixed(0)}ms hz=${Math.round(1000/detectGap)} hands=${hands.filter(h=>h.P).length} jit=${jitN?(jitSum/jitN).toFixed(1):'-'}px`);jitSum=0;jitN=0;
     status.textContent=`FPS ${fps} | HAND ${Math.round(1000/detectGap)}/s | ${tool.toUpperCase()}`;}
   requestAnimationFrame(loop);
 }
@@ -514,10 +570,10 @@ document.querySelectorAll('#tools button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('#tools button').forEach(x=>x.classList.toggle('on',x===b));
 });
 document.getElementById('add').onclick=()=>{if(balls.length<12)balls.push(makeBall(balls.length));};
-document.getElementById('clear').onclick=()=>{shapes=[];winCount=0;};
+document.getElementById('clear').onclick=()=>{shapes=[];winCount=0;saveScene();};
 document.getElementById('copylog').onclick=async()=>{
   const secs=Math.round((performance.now()-T0)/1000);
-  const txt=['JARVIS LOG v1',
+  const txt=['JARVIS LOG '+VERSION+` | pinch close<${CLOSE_T.toFixed(2)} open>${OPEN_T.toFixed(2)}`,
     `session ${secs}s | screen ${W}x${H} dpr ${devicePixelRatio} | cam ${video.videoWidth}x${video.videoHeight} | tool ${tool}`,
     navigator.userAgent.replace(/\(([^)]*)\)/,(m,g)=>'('+g.slice(0,60)+')').slice(0,160),
     'STATS '+JSON.stringify(STATS),
@@ -529,6 +585,8 @@ document.getElementById('copylog').onclick=async()=>{
   try{await navigator.clipboard.writeText(txt);msg.textContent='✅ הועתק! תדביק ל-Claude בצ׳אט.';}
   catch(e){ta.focus();ta.select();msg.textContent='סמן הכל בתיבה, העתק, ותדביק ל-Claude.';}
 };
+document.getElementById('star').onclick=()=>{log('⭐STAR','user marked this moment');buzz(30);flash('⭐ סומן',W/2,H/2);};
+document.getElementById('calib').onclick=()=>calib.begin();
 document.getElementById('logclose').onclick=()=>document.getElementById('logbox').style.display='none';
 document.getElementById('twohands').onclick=async()=>{
   TWO_HANDS=!TWO_HANDS;
@@ -538,6 +596,56 @@ document.getElementById('twohands').onclick=async()=>{
   forgetHand(hands[1]);
 };
 let flashes=[];
+/* ---------- personal calibration: learns YOUR open hand and YOUR pinch ---------- */
+const calib={step:0,open:[],closed:[],t0:0,
+  begin(){this.step=1;this.open=[];this.closed=[];this.t0=performance.now();log('calib','start');},
+  sample(d){ if(this.step===1)this.open.push(d); else if(this.step===2)this.closed.push(d); },
+  draw(t){
+    if(!this.step)return;
+    const el=t-this.t0, DUR=2000, hasHand=hands.some(h=>h.P);
+    if(!hasHand)this.t0=t-Math.min(el,300);          // pause while no hand is visible
+    const prog=Math.min(el/DUR,1);
+    ctx.fillStyle='rgba(0,10,20,.75)';ctx.fillRect(0,H/2-70,W,140);
+    ctx.fillStyle='#fff';ctx.font='700 20px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(this.step===1?'✋ פתח את היד והחזק':'🤏 צבוט והחזק',W/2,H/2-25);
+    ctx.font='13px system-ui';ctx.fillStyle='#9ff';ctx.fillText(hasHand?'כיול '+this.step+'/2':'תראה את היד למצלמה',W/2,H/2+5);
+    ctx.fillStyle='#033';ctx.fillRect(W*0.15,H/2+30,W*0.7,10);ctx.fillStyle='#0ff';ctx.fillRect(W*0.15,H/2+30,W*0.7*prog,10);
+    if(prog>=1){
+      if(this.step===1){this.step=2;this.t0=t;buzz(30);}
+      else this.finish();
+    }
+  },
+  finish(){
+    this.step=0; buzz([30,50,30]);
+    const med=a=>{const b=[...a].sort((x,y)=>x-y);return b.length?b[Math.floor(b.length/2)]:NaN;};
+    const open=med(this.open), low=[...this.closed].sort((x,y)=>x-y).slice(0,Math.max(1,Math.ceil(this.closed.length/2)));
+    const closed=med(low);
+    if(this.open.length<5||this.closed.length<5||!(open-closed>0.25)){
+      log('calib',`failed open=${open} closed=${closed} n=${this.open.length}/${this.closed.length}`);
+      flash('הכיול לא הצליח — נשארים הערכים הרגילים',W/2,H/2);return;}
+    CLOSE_T=Math.min(Math.max(closed+(open-closed)*0.35,0.2),0.5);
+    OPEN_T=Math.min(Math.max(closed+(open-closed)*0.6,CLOSE_T+0.08),0.85);
+    try{localStorage.setItem('jarvis_calib',JSON.stringify({close:CLOSE_T,open:OPEN_T}));}catch(e){}
+    log('calib',`ok open=${open.toFixed(2)} closed=${closed.toFixed(2)} → close<${CLOSE_T.toFixed(2)} open>${OPEN_T.toFixed(2)}`);
+    flash('✅ הכיול נשמר',W/2,H/2);
+  }
+};
+/* ---------- auto-save the scene ---------- */
+function saveScene(){
+  try{localStorage.setItem('jarvis_scene',JSON.stringify({
+    balls:balls.map(b=>({x:b.x,y:b.y,r:b.r,color:b.color,phase:b.phase})),
+    shapes:shapes.map(s=>{const c={...s};delete c.held;delete c.born;return c;})}));}catch(e){}
+}
+function loadScene(){
+  try{const d=JSON.parse(localStorage.getItem('jarvis_scene')||'null'); if(!d)return;
+    balls=(d.balls||[]).map(b=>({...b,type:'ball',vx:0,vy:0,held:null}));
+    shapes=(d.shapes||[]).map(s=>s.type==='window'?{...s,born:0}:s);
+    winCount=shapes.filter(s=>s.type==='window').length;
+    log('loaded',`${balls.length} balls, ${shapes.length} shapes`);
+  }catch(e){}
+}
+loadScene();
+setInterval(()=>{ if(!hands.some(h=>h.action))saveScene(); },2000);
 function flash(text,x,y){flashes.push({text,x,y,t:performance.now()});}
 document.getElementById('cam').onclick=()=>{showCam=!showCam;video.style.visibility=showCam?'visible':'hidden';};
 
@@ -556,6 +664,8 @@ document.getElementById('go').onclick=async()=>{
     try{landmarker=await HandLandmarker.createFromOptions(vision,opts("GPU"));}
     catch(e){landmarker=await HandLandmarker.createFromOptions(vision,opts("CPU"));}
     document.getElementById('start').style.display='none';
+    let hasCal=false; try{hasCal=!!localStorage.getItem('jarvis_calib');}catch(e){}
+    if(!hasCal)calib.begin();
     document.getElementById('tools').style.display='flex';
     document.getElementById('bar').style.display='flex';
   }catch(e){
