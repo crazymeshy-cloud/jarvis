@@ -19,6 +19,10 @@
   #tools{position:fixed;top:34px;left:50%;transform:translateX(-50%);display:none;gap:8px;z-index:4}
   #tools button,#bar button{font-size:15px;padding:10px 12px;min-width:54px}
   #tools button.on{background:rgba(0,255,255,.45);color:#001;box-shadow:0 0 12px #0ff}
+  .ytwrap{position:fixed;left:0;top:0;z-index:1;pointer-events:none;background:#000;overflow:hidden}
+  .ytwrap iframe{width:100%;height:100%;border:0}
+  #dock{position:fixed;left:6px;top:50%;transform:translateY(-50%);display:none;flex-direction:column;gap:8px;z-index:4}
+  #dock button{font-size:20px;padding:8px;min-width:46px}
   #bar{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);display:none;gap:8px;z-index:4}
   #status{position:fixed;top:8px;left:12px;z-index:4;font:600 11px ui-monospace,monospace;color:#6ff;direction:ltr}
 </style>
@@ -26,6 +30,7 @@
 <body>
 <video id="video" playsinline autoplay muted></video>
 <div id="shade"></div>
+<div id="ytLayer"></div>
 <canvas id="c"></canvas>
 <div id="status"></div>
 
@@ -52,6 +57,13 @@
   <button class="air" data-tool="rect">⬜</button>
   <button class="air" data-tool="window">🪟</button>
   <button class="air" data-tool="del">🗑</button>
+</div>
+<div id="dock">
+  <button class="air" data-app="youtube" title="YouTube">▶️</button>
+  <button class="air" data-app="clock">🕐</button>
+  <button class="air" data-app="radar">📡</button>
+  <button class="air" data-app="graph">📊</button>
+  <button class="air" data-app="status">🖥</button>
 </div>
 <div id="bar">
   <button class="air" id="add">➕ כדור</button>
@@ -116,6 +128,9 @@ for(let i=0;i<4;i++)balls.push(makeBall(i));
 /* ---------- shapes: lines, rectangles, windows ---------- */
 let shapes=[];
 const WIN_KINDS=['clock','radar','graph','status'];
+const WIN_TITLES={clock:'CLOCK',radar:'RADAR',graph:'FPS MONITOR',status:'SYSTEM',youtube:'YOUTUBE'};
+let hotspots=[];    // buttons drawn on windows this frame: {x,y,w,h,id,click}
+function hotspotAt(x,y){for(let i=hotspots.length-1;i>=0;i--){const b=hotspots[i];if(x>=b.x-4&&x<=b.x+b.w+4&&y>=b.y-4&&y<=b.y+b.h+4)return b;}return null;}
 let winCount=0;
 function moveShape(s,dx,dy){
   if(s.type==='line'){for(const p of s.pts){p.x+=dx;p.y+=dy;}}
@@ -152,6 +167,7 @@ const trash=()=>({x:56,y:H-70,r:38});
 const overTrash=(x,y)=>{const t=trash();return Math.hypot(x-t.x,y-t.y)<t.r+20;};
 function removeObj(o){
   if(o.type==='ball')balls=balls.filter(b=>b!==o); else shapes=shapes.filter(s=>s!==o);
+  if(o.kind==='youtube')destroyYT(o);
 }
 
 /* ---------- hands ---------- */
@@ -172,7 +188,7 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v12';
+const VERSION='v13';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
 let CLOSE_T=0.030, OPEN_T=0.050;        // thumb-to-index distance in METRES (3D), replaced by the user's own calibration
 try{const c=JSON.parse(localStorage.getItem('jarvis_calib3d')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
@@ -333,7 +349,7 @@ function endAction(h){
     if(a.type==='rect')shapes.push({type:'rect',x,y,w,h:hh,color:a.color});
     else{
       const kind=WIN_KINDS[winCount%WIN_KINDS.length];winCount++;
-      shapes.push({type:'window',x,y,w,h:Math.max(hh,70),color:'#00e5ff',kind,title:{clock:'CLOCK',radar:'RADAR',graph:'FPS MONITOR',status:'SYSTEM'}[kind]+' #'+winCount,born:performance.now()});
+      shapes.push({type:'window',id:newId(),x,y,w,h:Math.max(hh,70),color:'#00e5ff',kind,title:{clock:'CLOCK',radar:'RADAR',graph:'FPS MONITOR',status:'SYSTEM'}[kind]+' #'+winCount,born:performance.now()});
     }
   }
 }
@@ -341,6 +357,7 @@ function endAction(h){
 /* ---------- air buttons: hold fingertip on a button to press it ---------- */
 const DWELL=800, AIR_COOLDOWN=1200;
 function buttonAt(x,y){
+  const hs=hotspotAt(x,y); if(hs)return hs;
   for(const b of document.querySelectorAll('.air')){
     if(b.offsetParent===null)continue;
     const r=b.getBoundingClientRect();
@@ -352,7 +369,7 @@ function dwell(h,now){
   if(!h.P||h.pinching||h.action||!h.pointing||now<(h.airCooldownUntil||0)){h.dwellBtn=null;return;}
   const tip=h.P[8], b=buttonAt(tip.x,tip.y);
   if(b!==h.dwellBtn){h.dwellBtn=b;h.dwellStart=now;h.dwellDone=false;}
-  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;h.airCooldownUntil=now+AIR_COOLDOWN;log('airClick',b.dataset.tool||b.id);buzz(8);b.click();}
+  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;h.airCooldownUntil=now+AIR_COOLDOWN;log('airClick',(b.dataset&&(b.dataset.tool||b.dataset.app))||b.id);buzz(8);b.click();}
 }
 
 function updateHands(now){
@@ -448,7 +465,20 @@ function drawWindow(s,t){
   ctx.save();ctx.beginPath();ctx.rect(s.x,s.y,s.w,s.h);ctx.clip();
   ctx.fillStyle='#bff';ctx.font='600 12px ui-monospace,monospace';ctx.textAlign='left';ctx.textBaseline='middle';
   ctx.fillText(s.title,s.x+8,s.y+TB/2);
-  ctx.fillStyle='#ff3d7f';ctx.beginPath();ctx.arc(s.x+s.w-14,s.y+TB/2,5,0,Math.PI*2);ctx.fill();
+  // title-bar buttons (point ☝️ at one and hold, or tap it)
+  const btns=[['✕','close',()=>closeWindow(s)],[s.max?'🗗':'⛶','max',()=>toggleMax(s)]];
+  if(s.kind==='youtube'){const y=ytMap.get(s.id);
+    btns.push([y&&y.muted?'🔇':'🔊','mute',()=>ytCmd(s,'mute')],['⏯','play',()=>ytCmd(s,'play')],['🔗','link',()=>ytCmd(s,'link')]);}
+  ctx.textAlign='center';ctx.font='15px system-ui';
+  btns.forEach(([icon,id,fn],i)=>{
+    const bw=30,bx=s.x+s.w-(i+1)*(bw+4)-2,by=s.y+2;
+    if(bx<s.x+60)return;
+    ctx.fillStyle=id==='close'?'rgba(255,61,90,.35)':'rgba(0,229,255,.18)';ctx.fillRect(bx,by,bw,TB-4);
+    ctx.fillStyle='#fff';ctx.fillText(icon,bx+bw/2,s.y+TB/2+1);
+    hotspots.push({x:bx,y:by,w:bw,h:TB-4,id:'win:'+id,dataset:{},click:fn});
+  });
+  ctx.textAlign='left';
+  if(s.kind==='youtube'){ctx.restore();return;}     // the video itself is a real YouTube player under the canvas
   const cx=s.x+s.w/2, cy=s.y+TB+(s.h-TB)/2, ch=s.h-TB;
   if(s.kind==='clock'){
     const d=new Date();
@@ -564,8 +594,10 @@ function loop(t){
   updateHands(t);
   physics(k);
   ctx.clearRect(0,0,W,H);
+  hotspots=[];
   for(const s of shapes){ if(s.type==='line')drawLine(s); else if(s.type==='rect')drawRect(s); else drawWindow(s,t); }
   drawPreviews();
+  syncYT();
   drawBalls(t);
   drawTrash();
   drawHands(t);
@@ -585,7 +617,7 @@ document.querySelectorAll('#tools button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('#tools button').forEach(x=>x.classList.toggle('on',x===b));
 });
 document.getElementById('add').onclick=()=>{if(balls.length<12)balls.push(makeBall(balls.length));};
-document.getElementById('clear').onclick=()=>{shapes=[];winCount=0;saveScene();};
+document.getElementById('clear').onclick=()=>{shapes.forEach(s=>{if(s.kind==='youtube')destroyYT(s);});shapes=[];winCount=0;saveScene();};
 document.getElementById('copylog').onclick=async()=>{
   const secs=Math.round((performance.now()-T0)/1000);
   const txt=['JARVIS LOG '+VERSION+` | 3D pinch close<${cm(CLOSE_T)} open>${cm(OPEN_T)}`,
@@ -611,6 +643,68 @@ document.getElementById('twohands').onclick=async()=>{
   forgetHand(hands[1]);
 };
 let flashes=[];
+/* ---------- desktop: apps, windows, YouTube ---------- */
+const newId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function openApp(kind){
+  let videoId=null;
+  if(kind==='youtube'){
+    const url=prompt('הדבק קישור של סרטון יוטיוב:','');
+    videoId=parseYT(url||''); if(!videoId){ if(url)flash('הקישור לא נראה כמו יוטיוב',W/2,H/2); return; }
+  }
+  const w=Math.min(W-70,kind==='youtube'?340:230), hh=kind==='youtube'?Math.round(w*9/16)+26:150;
+  const win={type:'window',id:newId(),x:Math.round((W-w)/2)+20,y:Math.round(H*0.25),w,h:hh,color:'#00e5ff',kind,
+    title:WIN_TITLES[kind],born:performance.now(),videoId};
+  shapes.push(win); winCount++; buzz(20); log('openApp',kind+(videoId?' '+videoId:''));
+  if(kind==='youtube')ensureYT(win);
+}
+function closeWindow(s){removeObj(s);buzz([20,40,20]);log('winBtn','close '+s.kind);}
+function toggleMax(s){
+  if(s.max){Object.assign(s,s.max);s.max=null;}
+  else{s.max={x:s.x,y:s.y,w:s.w,h:s.h};Object.assign(s,{x:60,y:34,w:W-66,h:H-110});}
+  shapes=shapes.filter(o=>o!==s);shapes.push(s); buzz(15); log('winBtn','max '+s.kind);
+}
+function parseYT(u){
+  const m=u.match(/(?:youtu\.be\/|v=|shorts\/|embed\/|live\/)([A-Za-z0-9_-]{11})/)||u.match(/^([A-Za-z0-9_-]{11})$/);
+  return m?m[1]:null;
+}
+const ytMap=new Map(); let ytReady=false;
+window.onYouTubeIframeAPIReady=()=>{ytReady=true;log('yt','api ready');shapes.forEach(s=>{if(s.kind==='youtube')ensureYT(s);});};
+{const sc=document.createElement('script');sc.src='https://www.youtube.com/iframe_api';sc.onerror=()=>log('yt','api failed to load');document.head.appendChild(sc);}
+function ensureYT(s){
+  if(!ytReady||ytMap.has(s.id)||!s.videoId)return;
+  const div=document.createElement('div');div.className='ytwrap';
+  const inner=document.createElement('div');inner.id='yt_'+s.id;div.appendChild(inner);
+  document.getElementById('ytLayer').appendChild(div);
+  const rec={div,player:null,muted:true};
+  rec.player=new YT.Player(inner.id,{videoId:s.videoId,width:'100%',height:'100%',
+    playerVars:{playsinline:1,rel:0,modestbranding:1,controls:0},
+    events:{onReady:e=>{try{e.target.mute();e.target.playVideo();}catch(err){} log('yt','ready '+s.videoId);},
+            onError:e=>{log('yt','error '+e.data);flash('יוטיוב לא מאפשר לנגן את הסרטון הזה כאן',s.x+s.w/2,s.y+40);}}});
+  ytMap.set(s.id,rec);
+}
+function destroyYT(s){const r=ytMap.get(s.id);if(!r)return;try{r.player.destroy();}catch(e){}r.div.remove();ytMap.delete(s.id);}
+function ytCmd(s,cmd){
+  const r=ytMap.get(s.id); if(!r||!r.player)return; const p=r.player;
+  try{
+    if(cmd==='play'){ (p.getPlayerState&&p.getPlayerState()===1)?p.pauseVideo():p.playVideo(); }
+    else if(cmd==='mute'){ if(r.muted){p.unMute();p.setVolume(80);r.muted=false;} else {p.mute();r.muted=true;} }
+    else if(cmd==='link'){ const id=parseYT(prompt('קישור יוטיוב חדש:','')||''); if(id){s.videoId=id;p.loadVideoById(id);} }
+  }catch(e){log('yt','cmd error '+cmd);}
+  buzz(10); log('ytCmd',cmd);
+}
+function syncYT(){
+  const TB=26;
+  for(const s of shapes){ if(s.kind!=='youtube')continue; const r=ytMap.get(s.id); if(!r)continue;
+    const open=(performance.now()-(s.born||0))>250;
+    r.div.style.display=open?'block':'none';
+    r.div.style.left=s.x+'px';r.div.style.top=(s.y+TB)+'px';
+    r.div.style.width=s.w+'px';r.div.style.height=Math.max(0,s.h-TB)+'px';
+    r.div.style.zIndex=1+shapes.indexOf(s)/1000;      // later windows on top
+  }
+}
+document.querySelectorAll('#dock button').forEach(b=>b.onclick=()=>openApp(b.dataset.app));
+/* tapping a window button with a finger works too (and counts as a real tap for sound) */
+cv.addEventListener('pointerdown',e=>{const b=hotspotAt(e.clientX,e.clientY);if(b){log('tap',b.id);b.click();}});
 /* ---------- personal calibration: learns YOUR open hand and YOUR pinch ---------- */
 const calib={step:0,open:[],closed:[],need:14,
   begin(){this.step=1;this.open=[];this.closed=[];this.lastD=null;log('calib','start');},
@@ -655,12 +749,13 @@ const calib={step:0,open:[],closed:[],need:14,
 function saveScene(){
   try{localStorage.setItem('jarvis_scene',JSON.stringify({
     balls:balls.map(b=>({x:b.x,y:b.y,r:b.r,color:b.color,phase:b.phase})),
-    shapes:shapes.map(s=>{const c={...s};delete c.held;delete c.born;return c;})}));}catch(e){}
+    shapes:shapes.map(s=>{const c={...s};delete c.held;delete c.born;delete c.max;return c;})}));}catch(e){}
 }
 function loadScene(){
   try{const d=JSON.parse(localStorage.getItem('jarvis_scene')||'null'); if(!d)return;
     balls=(d.balls||[]).map(b=>({...b,type:'ball',vx:0,vy:0,held:null}));
-    shapes=(d.shapes||[]).map(s=>s.type==='window'?{...s,born:0}:s);
+    shapes=(d.shapes||[]).map(s=>s.type==='window'?{...s,born:0,id:s.id||newId()}:s);
+    if(typeof ytReady!=='undefined'&&ytReady)shapes.forEach(s=>{if(s.kind==='youtube')ensureYT(s);});
     winCount=shapes.filter(s=>s.type==='window').length;
     log('loaded',`${balls.length} balls, ${shapes.length} shapes`);
   }catch(e){}
@@ -688,6 +783,7 @@ document.getElementById('go').onclick=async()=>{
     let hasCal=false; try{hasCal=!!localStorage.getItem('jarvis_calib3d');}catch(e){}
     if(!hasCal)calib.begin();
     document.getElementById('tools').style.display='flex';
+    document.getElementById('dock').style.display='flex';
     document.getElementById('bar').style.display='flex';
   }catch(e){
     btn.textContent='הפעל מערכת';btn.disabled=false;
