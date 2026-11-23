@@ -172,7 +172,7 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v9';
+const VERSION='v10';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
 let CLOSE_T=0.34, OPEN_T=0.50;          // pinch thresholds — replaced by the user's own calibration
 try{const c=JSON.parse(localStorage.getItem('jarvis_calib')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
@@ -235,15 +235,17 @@ function handleHands(res){
     /* ONLY real pinches count (👌 🤏 🫰): thumb tip on the index TIP, with the index finger not folded
        into the palm. A fist 👊, thumb-down 👎 or finger pointed at the camera 🫵 can bring thumb and
        index close in the picture, but the index is folded/foreshortened → blocked. */
-    const idxFolded=dist(P[8],P[5])<0.27*size;   // v8 used 0.42 and blocked real pinches (they measured 0.30-0.39)
+    const idxFolded=dist(P[8],P[5])<0.22*size;   // real pinches measured 0.29-0.41; a folded index is lower   // v8 used 0.42 and blocked real pinches (they measured 0.30-0.39)
     const thumbInPalm=dist(P[4],P[9])<0.30*size;
     const closeLike=pinchD<CLOSE_T, valid=!idxFolded&&!thumbInPalm;
     h.pose=closeLike?(valid?'pinch':'blocked'):(h.pointing?'point':'open');
+    if(!(closeLike&&!valid))h.blockSince=null;
     if(closeLike&&valid){
       h.openSince=null;
       if(h.closeSince==null){h.closeSince=now;log('pinchDown',`${slot?'B':'A'} d=${pinchD.toFixed(2)}`+(h.pinching?' (already)':''));}
     } else if(closeLike&&!valid){
-      if(!h.pinching&&h.closeSince!=null)h.closeSince=null;       // fist etc. never starts anything
+      if(h.blockSince==null)h.blockSince=now;
+      if(!h.pinching&&h.closeSince!=null&&now-h.blockSince>=150)h.closeSince=null;   // fist etc. never starts anything (one odd frame is ignored)
       if(!h.blockLogged){h.blockLogged=true;log('blockedPose',`d=${pinchD.toFixed(2)} idx=${(dist(P[8],P[5])/size).toFixed(2)} thumb=${(dist(P[4],P[9])/size).toFixed(2)}`);}
     } else if(pinchD>OPEN_T){
       h.blockLogged=false;
