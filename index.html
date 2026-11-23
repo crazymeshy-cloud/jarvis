@@ -6,7 +6,6 @@
 <title>JARVIS — שליטה בידיים</title>
 <style>
   html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,-apple-system,sans-serif;color:#9ff;touch-action:none}
-  /* video shown by the browser itself (GPU-composited) instead of being redrawn on the canvas every frame */
   video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);z-index:0}
   #shade{position:fixed;inset:0;z-index:1;pointer-events:none;
     background-color:rgba(0,10,20,.55);
@@ -15,11 +14,13 @@
   canvas{position:fixed;inset:0;width:100%;height:100%;z-index:2}
   #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:radial-gradient(circle at center,#012 0%,#000 70%);z-index:5;text-align:center;padding:20px}
   #start h1{margin:0;font-size:42px;letter-spacing:8px;color:#5ff;text-shadow:0 0 18px #0ff}
-  #start p{margin:0;color:#8cc;max-width:420px;line-height:1.6}
+  #start p{margin:0;color:#8cc;max-width:440px;line-height:1.6}
   button{font:inherit;font-weight:700;border:1px solid #0ff;background:rgba(0,255,255,.1);color:#aff;border-radius:10px;padding:12px 26px;font-size:18px;cursor:pointer}
-  #bar{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);display:none;gap:10px;z-index:4}
-  #bar button{font-size:15px;padding:8px 14px}
-  #status{position:fixed;top:12px;left:12px;z-index:4;font:600 12px ui-monospace,monospace;color:#6ff;direction:ltr}
+  #tools{position:fixed;top:34px;left:50%;transform:translateX(-50%);display:none;gap:8px;z-index:4}
+  #tools button,#bar button{font-size:15px;padding:10px 12px;min-width:54px}
+  #tools button.on{background:rgba(0,255,255,.45);color:#001;box-shadow:0 0 12px #0ff}
+  #bar{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);display:none;gap:8px;z-index:4}
+  #status{position:fixed;top:8px;left:12px;z-index:4;font:600 11px ui-monospace,monospace;color:#6ff;direction:ltr}
 </style>
 </head>
 <body>
@@ -30,15 +31,27 @@
 
 <div id="start">
   <h1>J.A.R.V.I.S</h1>
-  <p>תרים יד מול המצלמה.<br>🤏 <b>צביטה</b> (אגודל + אצבע מורה) = תפיסת כדור.<br>תזיז את היד כדי להזיז אותו, ותפתח את האצבעות כדי לשחרר. אם תשחרר תוך כדי תנועה, הוא נזרק.<br>☝️ אפשר גם לדחוף כדורים עם קצה האצבע.</p>
+  <p>
+  🤏 <b>צביטה</b> (אגודל + אצבע מורה) = פעולה.<br>
+  ☝️ <b>בחירת כלי באוויר:</b> משאירים את קצה האצבע על כפתור למעלה שנייה, עד שהעיגול מתמלא (או נוגעים במסך).<br><br>
+  ✋ <b>הזזה</b> — צובטים על כדור / ריבוע / חלון / קו ומזיזים. זורקים לפח 🗑 כדי למחוק.<br>
+  ✏️ <b>קו</b> — צובטים ומזיזים כדי לצייר.<br>
+  ⬜ <b>ריבוע</b> ו־🪟 <b>חלון</b> — צובטים בפינה אחת, גוררים ומשחררים.
+  </p>
   <button id="go">הפעל מערכת</button>
   <p id="err" style="color:#f88"></p>
 </div>
 
+<div id="tools">
+  <button class="air on" data-tool="move">✋</button>
+  <button class="air" data-tool="draw">✏️</button>
+  <button class="air" data-tool="rect">⬜</button>
+  <button class="air" data-tool="window">🪟</button>
+</div>
 <div id="bar">
-  <button id="add">➕ כדור</button>
-  <button id="reset">↺ איפוס</button>
-  <button id="cam">📷</button>
+  <button class="air" id="add">➕ כדור</button>
+  <button class="air" id="clear">🧹 נקה</button>
+  <button class="air" id="cam">📷</button>
 </div>
 
 <script type="module">
@@ -47,9 +60,8 @@ import {FilesetResolver, HandLandmarker} from "https://cdn.jsdelivr.net/npm/@med
 const video=document.getElementById('video'), cv=document.getElementById('c');
 const ctx=cv.getContext('2d',{alpha:true,desynchronized:true});
 const status=document.getElementById('status');
-let W,H,DPR, landmarker, showCam=true;
+let W,H,DPR, landmarker, showCam=true, tool='move';
 
-/* lower canvas resolution on phones = far fewer pixels to paint */
 function resize(){
   DPR=Math.min(devicePixelRatio||1,1.25);
   W=innerWidth;H=innerHeight;cv.width=Math.round(W*DPR);cv.height=Math.round(H*DPR);
@@ -58,8 +70,10 @@ function resize(){
 addEventListener('resize',()=>{resize();balls.forEach(clampBall);});
 resize();
 
-/* ---------- balls: glow is pre-rendered ONCE into a sprite (shadowBlur every frame kills mobile FPS) ---------- */
 const COLORS=['#00f0ff','#ff3d7f','#ffd23d','#7dff6b','#b47dff','#ff8a3d'];
+let colorIdx=0; const nextColor=()=>COLORS[(colorIdx++)%COLORS.length];
+
+/* ---------- balls ---------- */
 const spriteCache=new Map();
 function sprite(color,r){
   const key=color+'|'+Math.round(r);
@@ -78,13 +92,43 @@ function sprite(color,r){
 }
 let balls=[];
 function makeBall(i){
-  const r=Math.round(Math.min(W,H)*(0.06+Math.random()*0.03));
-  return {x:W*(0.2+Math.random()*0.6),y:H*(0.2+Math.random()*0.5),vx:(Math.random()-.5)*4,vy:(Math.random()-.5)*4,r,
+  const r=Math.round(Math.min(W,H)*(0.05+Math.random()*0.03));
+  return {type:'ball',x:W*(0.2+Math.random()*0.6),y:H*(0.25+Math.random()*0.4),vx:(Math.random()-.5)*4,vy:(Math.random()-.5)*4,r,
           color:COLORS[i%COLORS.length],held:null,phase:Math.random()*6};
 }
 function clampBall(b){b.x=Math.min(Math.max(b.x,b.r),W-b.r);b.y=Math.min(Math.max(b.y,b.r),H-b.r);}
-function reset(){balls=[];for(let i=0;i<6;i++)balls.push(makeBall(i));}
-reset();
+for(let i=0;i<4;i++)balls.push(makeBall(i));
+
+/* ---------- shapes: lines, rectangles, windows ---------- */
+let shapes=[];
+const WIN_KINDS=['clock','radar','graph','status'];
+let winCount=0;
+function moveShape(s,dx,dy){
+  if(s.type==='line'){for(const p of s.pts){p.x+=dx;p.y+=dy;}}
+  else {s.x+=dx;s.y+=dy;}
+}
+function hitShape(s,x,y){
+  if(s.type==='line'){
+    for(let i=1;i<s.pts.length;i++){if(segDist(x,y,s.pts[i-1],s.pts[i])<20)return true;}
+    return false;
+  }
+  return x>=s.x-10&&x<=s.x+s.w+10&&y>=s.y-10&&y<=s.y+s.h+10;
+}
+function segDist(px,py,a,b){
+  const dx=b.x-a.x,dy=b.y-a.y,l=dx*dx+dy*dy||1;
+  let t=((px-a.x)*dx+(py-a.y)*dy)/l;t=Math.max(0,Math.min(1,t));
+  return Math.hypot(px-(a.x+t*dx),py-(a.y+t*dy));
+}
+function hitTest(x,y){
+  for(let i=balls.length-1;i>=0;i--){const b=balls[i];if(b.held==null&&Math.hypot(b.x-x,b.y-y)<b.r*1.6)return b;}
+  for(let i=shapes.length-1;i>=0;i--){if(!shapes[i].held&&hitShape(shapes[i],x,y))return shapes[i];}
+  return null;
+}
+const trash=()=>({x:56,y:H-70,r:38});
+const overTrash=(x,y)=>{const t=trash();return Math.hypot(x-t.x,y-t.y)<t.r+20;};
+function removeObj(o){
+  if(o.type==='ball')balls=balls.filter(b=>b!==o); else shapes=shapes.filter(s=>s!==o);
+}
 
 /* ---------- hands ---------- */
 const hands=[{},{}];
@@ -103,43 +147,93 @@ function handleHands(res){
   (res.landmarks||[]).forEach((lms,hi)=>{
     if(hi>1)return; seen.add(hi);
     const P=lms.map(mapPt), h=hands[hi];
-    const size=dist(P[0],P[9])||1;
-    const pinchD=dist(P[4],P[8])/size;
+    const pinchD=dist(P[4],P[8])/(dist(P[0],P[9])||1);
     h.target={x:(P[4].x+P[8].x)/2,y:(P[4].y+P[8].y)/2};
-    h.P=P; h.lastSeen=performance.now();
+    h.P=P;
     if(h.sx==null){h.sx=h.target.x;h.sy=h.target.y;}
-    if(!h.pinching && pinchD<0.32){
-      h.pinching=true;
-      let best=null,bd=1e9;
-      for(const b of balls){ if(b.held!=null)continue; const d=Math.hypot(b.x-h.sx,b.y-h.sy); if(d<b.r*1.8&&d<bd){bd=d;best=b;} }
-      if(best){best.held=hi;h.ball=best;h.offX=best.x-h.sx;h.offY=best.y-h.sy;}
-    } else if(h.pinching && pinchD>0.48){
-      release(h);
-    }
+    if(!h.pinching&&pinchD<0.32){h.pinching=true;h.pinchStarted=true;}
+    else if(h.pinching&&pinchD>0.48){h.pinching=false;h.pinchEnded=true;}
   });
-  [0,1].forEach(i=>{ if(!seen.has(i)){ const h=hands[i]; release(h); h.P=null; h.sx=null; h.target=null; h.hist=[]; } });
-}
-function release(h){
-  if(h.ball){
-    const hs=h.hist||[];
-    if(hs.length>1){const a=hs[0],z=hs[hs.length-1],dt=Math.max(16,z.t-a.t);h.ball.vx=(z.x-a.x)/dt*16;h.ball.vy=(z.y-a.y)/dt*16;}
-    h.ball.held=null;
-  }
-  h.ball=null;h.pinching=false;
+  [0,1].forEach(i=>{ if(!seen.has(i)){ const h=hands[i]; endAction(h); h.pinching=false; h.P=null; h.sx=null; h.target=null; h.hist=[]; h.dwellBtn=null; } });
 }
 
-/* runs every render frame: glides the cursor toward the last detected position,
-   so motion stays smooth even when hand detection runs slower than the screen */
+/* ---------- actions ---------- */
+function startAction(h){
+  const x=h.sx,y=h.sy;
+  if(tool==='move'){
+    const o=hitTest(x,y); if(!o)return;
+    o.held=true;
+    if(o.type==='ball'){o.held=hands.indexOf(h);}
+    else {shapes=shapes.filter(s=>s!==o);shapes.push(o);}   // bring to front
+    h.action={kind:'grab',obj:o,lx:x,ly:y};
+  } else if(tool==='draw'){
+    const line={type:'line',pts:[{x,y}],color:nextColor()};
+    shapes.push(line); h.action={kind:'draw',line};
+  } else {
+    h.action={kind:'box',type:tool,x0:x,y0:y,x1:x,y1:y,color:nextColor()};
+  }
+}
+function moveAction(h){
+  const a=h.action; if(!a)return; const x=h.sx,y=h.sy;
+  if(a.kind==='grab'){
+    const dx=x-a.lx,dy=y-a.ly; a.lx=x;a.ly=y;
+    if(a.obj.type==='ball'){a.obj.x+=dx;a.obj.y+=dy;a.obj.vx=dx;a.obj.vy=dy;} else moveShape(a.obj,dx,dy);
+  } else if(a.kind==='draw'){
+    const p=a.line.pts[a.line.pts.length-1];
+    if(Math.hypot(x-p.x,y-p.y)>4)a.line.pts.push({x,y});
+  } else if(a.kind==='box'){a.x1=x;a.y1=y;}
+}
+function endAction(h){
+  const a=h.action; if(!a)return; h.action=null;
+  if(a.kind==='grab'){
+    const o=a.obj;
+    if(overTrash(h.sx??0,h.sy??0)){removeObj(o);return;}
+    if(o.type==='ball'){
+      const hs=h.hist||[];
+      if(hs.length>1){const p=hs[0],z=hs[hs.length-1],dt=Math.max(16,z.t-p.t);o.vx=(z.x-p.x)/dt*16;o.vy=(z.y-p.y)/dt*16;}
+      o.held=null;
+    } else o.held=false;
+  } else if(a.kind==='draw'){
+    if(a.line.pts.length<2)shapes=shapes.filter(s=>s!==a.line);
+  } else if(a.kind==='box'){
+    const x=Math.min(a.x0,a.x1),y=Math.min(a.y0,a.y1),w=Math.abs(a.x1-a.x0),hh=Math.abs(a.y1-a.y0);
+    if(w<40||hh<30)return;
+    if(a.type==='rect')shapes.push({type:'rect',x,y,w,h:hh,color:a.color});
+    else{
+      const kind=WIN_KINDS[winCount%WIN_KINDS.length];winCount++;
+      shapes.push({type:'window',x,y,w,h:Math.max(hh,70),color:'#00e5ff',kind,title:{clock:'CLOCK',radar:'RADAR',graph:'FPS MONITOR',status:'SYSTEM'}[kind]+' #'+winCount,born:performance.now()});
+    }
+  }
+}
+
+/* ---------- air buttons: hold fingertip on a button to press it ---------- */
+const DWELL=650;
+function buttonAt(x,y){
+  for(const b of document.querySelectorAll('.air')){
+    if(b.offsetParent===null)continue;
+    const r=b.getBoundingClientRect();
+    if(x>=r.left-6&&x<=r.right+6&&y>=r.top-6&&y<=r.bottom+6)return b;
+  }
+  return null;
+}
+function dwell(h,now){
+  if(!h.P||h.pinching||h.action){h.dwellBtn=null;return;}
+  const tip=h.P[8], b=buttonAt(tip.x,tip.y);
+  if(b!==h.dwellBtn){h.dwellBtn=b;h.dwellStart=now;h.dwellDone=false;}
+  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;b.click();}
+}
+
 function updateHands(now){
-  hands.forEach((h,hi)=>{
+  hands.forEach(h=>{
     if(!h.target)return;
-    h.sx+= (h.target.x-h.sx)*0.45; h.sy+=(h.target.y-h.sy)*0.45;
+    h.sx+=(h.target.x-h.sx)*0.45; h.sy+=(h.target.y-h.sy)*0.45;
     h.hist=(h.hist||[]);h.hist.push({x:h.sx,y:h.sy,t:now});
     while(h.hist.length&&now-h.hist[0].t>120)h.hist.shift();
-    if(h.ball){
-      const b=h.ball; const tx=h.sx+h.offX, ty=h.sy+h.offY;
-      b.vx=tx-b.x; b.vy=ty-b.y; b.x=tx; b.y=ty; h.offX*=0.85; h.offY*=0.85;
-    } else if(h.P){
+    if(h.pinchStarted){h.pinchStarted=false;if(!buttonAt(h.sx,h.sy))startAction(h);}
+    if(h.pinching)moveAction(h);
+    if(h.pinchEnded){h.pinchEnded=false;endAction(h);}
+    dwell(h,now);
+    if(!h.action&&tool==='move'&&h.P){
       const tip=h.P[8];
       for(const b of balls){ if(b.held!=null)continue;
         const d=Math.hypot(b.x-tip.x,b.y-tip.y), min=b.r+10;
@@ -149,7 +243,7 @@ function updateHands(now){
   });
 }
 
-/* ---------- physics (time-scaled so speed is the same at 30 or 60 FPS) ---------- */
+/* ---------- physics ---------- */
 function physics(k){
   for(const b of balls){
     if(b.held!=null)continue;
@@ -172,7 +266,66 @@ function physics(k){
   }
 }
 
-/* ---------- drawing (no shadowBlur anywhere, batched paths) ---------- */
+/* ---------- drawing ---------- */
+const fpsHist=[];
+function corners(x,y,w,h,len){
+  ctx.moveTo(x,y+len);ctx.lineTo(x,y);ctx.lineTo(x+len,y);
+  ctx.moveTo(x+w-len,y);ctx.lineTo(x+w,y);ctx.lineTo(x+w,y+len);
+  ctx.moveTo(x+w,y+h-len);ctx.lineTo(x+w,y+h);ctx.lineTo(x+w-len,y+h);
+  ctx.moveTo(x+len,y+h);ctx.lineTo(x,y+h);ctx.lineTo(x,y+h-len);
+}
+function drawLine(s){
+  ctx.strokeStyle=s.color;ctx.lineWidth=s.held?6:4;ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.beginPath();ctx.moveTo(s.pts[0].x,s.pts[0].y);
+  for(let i=1;i<s.pts.length;i++)ctx.lineTo(s.pts[i].x,s.pts[i].y);
+  ctx.stroke();
+}
+function drawRect(s){
+  ctx.fillStyle=s.color+'22';ctx.fillRect(s.x,s.y,s.w,s.h);
+  ctx.strokeStyle=s.color;ctx.lineWidth=s.held?3:2;ctx.strokeRect(s.x,s.y,s.w,s.h);
+  ctx.lineWidth=4;ctx.beginPath();corners(s.x-4,s.y-4,s.w+8,s.h+8,14);ctx.stroke();
+}
+function drawWindow(s,t){
+  const age=Math.min((t-s.born)/250,1);              // open animation
+  const h=s.h*age, TB=26;
+  ctx.fillStyle='rgba(0,25,40,0.78)';ctx.fillRect(s.x,s.y,s.w,h);
+  ctx.fillStyle='rgba(0,229,255,0.25)';ctx.fillRect(s.x,s.y,s.w,Math.min(TB,h));
+  ctx.strokeStyle=s.held?'#fff':s.color;ctx.lineWidth=s.held?2.5:1.5;ctx.strokeRect(s.x,s.y,s.w,h);
+  ctx.lineWidth=3;ctx.beginPath();corners(s.x-5,s.y-5,s.w+10,h+10,16);ctx.stroke();
+  if(age<1)return;
+  ctx.save();ctx.beginPath();ctx.rect(s.x,s.y,s.w,s.h);ctx.clip();
+  ctx.fillStyle='#bff';ctx.font='600 12px ui-monospace,monospace';ctx.textAlign='left';ctx.textBaseline='middle';
+  ctx.fillText(s.title,s.x+8,s.y+TB/2);
+  ctx.fillStyle='#ff3d7f';ctx.beginPath();ctx.arc(s.x+s.w-14,s.y+TB/2,5,0,Math.PI*2);ctx.fill();
+  const cx=s.x+s.w/2, cy=s.y+TB+(s.h-TB)/2, ch=s.h-TB;
+  if(s.kind==='clock'){
+    const d=new Date();
+    ctx.fillStyle='#5ff';ctx.textAlign='center';
+    ctx.font=`700 ${Math.max(14,Math.min(s.w/6,ch*0.5))}px ui-monospace,monospace`;
+    ctx.fillText(d.toLocaleTimeString('he-IL',{hour12:false}),cx,cy);
+  } else if(s.kind==='radar'){
+    const r=Math.min(s.w,ch)*0.4, a=t*0.003;
+    ctx.strokeStyle='rgba(0,255,255,.5)';ctx.lineWidth=1;ctx.beginPath();
+    ctx.arc(cx,cy,r,0,Math.PI*2);ctx.moveTo(cx+r*0.5,cy);ctx.arc(cx,cy,r*0.5,0,Math.PI*2);
+    ctx.moveTo(cx-r,cy);ctx.lineTo(cx+r,cy);ctx.moveTo(cx,cy-r);ctx.lineTo(cx,cy+r);ctx.stroke();
+    ctx.fillStyle='rgba(0,255,255,.25)';ctx.beginPath();ctx.moveTo(cx,cy);ctx.arc(cx,cy,r,a-0.6,a);ctx.closePath();ctx.fill();
+    ctx.strokeStyle='#5ff';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));ctx.stroke();
+    ctx.fillStyle='#ff3d7f';
+    for(const b of balls){const px=cx+((b.x/W)-.5)*r*1.6,py=cy+((b.y/H)-.5)*r*1.6;ctx.fillRect(px-2,py-2,4,4);}
+  } else if(s.kind==='graph'){
+    const x0=s.x+8,w=s.w-16,y0=s.y+TB+8,gh=ch-16;
+    ctx.strokeStyle='rgba(0,255,255,.2)';ctx.lineWidth=1;ctx.strokeRect(x0,y0,w,gh);
+    ctx.strokeStyle='#7dff6b';ctx.lineWidth=2;ctx.beginPath();
+    fpsHist.forEach((v,i)=>{const px=x0+i/(60-1)*w,py=y0+gh-Math.min(v,60)/60*gh;i?ctx.lineTo(px,py):ctx.moveTo(px,py);});
+    ctx.stroke();
+    ctx.fillStyle='#7dff6b';ctx.textAlign='right';ctx.fillText((fpsHist[fpsHist.length-1]||0)+' FPS',x0+w-4,y0+10);
+  } else {
+    ctx.fillStyle='#9ff';ctx.textAlign='left';ctx.font='600 12px ui-monospace,monospace';
+    const lines=['STATUS ......... ONLINE','HANDS .......... '+hands.filter(h=>h.P).length,'OBJECTS ........ '+(balls.length+shapes.length),'TOOL ........... '+tool.toUpperCase(),'POWER .......... '+(80+Math.round(Math.sin(t*0.001)*15))+'%'];
+    lines.forEach((l,i)=>ctx.fillText(l,s.x+10,s.y+TB+16+i*17));
+  }
+  ctx.restore();
+}
 function drawBalls(t){
   ctx.lineWidth=2;
   for(const b of balls){
@@ -184,10 +337,27 @@ function drawBalls(t){
     ctx.arc(b.x,b.y,rr,rot,rot+1.9);
     ctx.moveTo(b.x+rr*Math.cos(rot+Math.PI),b.y+rr*Math.sin(rot+Math.PI));
     ctx.arc(b.x,b.y,rr,rot+Math.PI,rot+Math.PI+1.9);
-    if(b.held!=null){const r2=b.r*1.6;ctx.moveTo(b.x+r2,b.y);ctx.arc(b.x,b.y,r2,0,Math.PI*2);}
     ctx.stroke();
   }
   ctx.globalAlpha=1;
+}
+function drawPreviews(){
+  for(const h of hands){
+    const a=h.action; if(!a||a.kind!=='box')continue;
+    const x=Math.min(a.x0,a.x1),y=Math.min(a.y0,a.y1),w=Math.abs(a.x1-a.x0),hh=Math.abs(a.y1-a.y0);
+    ctx.setLineDash([8,6]);ctx.strokeStyle=a.type==='window'?'#00e5ff':a.color;ctx.lineWidth=2;ctx.strokeRect(x,y,w,hh);ctx.setLineDash([]);
+    ctx.fillStyle='#aff';ctx.font='600 11px ui-monospace,monospace';ctx.textAlign='left';ctx.textBaseline='bottom';
+    ctx.fillText(`${Math.round(w)}×${Math.round(hh)}`,x,y-4);
+  }
+}
+function drawTrash(){
+  const holding=hands.some(h=>h.action&&h.action.kind==='grab');
+  if(!holding)return;
+  const t=trash(), hot=hands.some(h=>h.action&&h.action.kind==='grab'&&overTrash(h.sx,h.sy));
+  ctx.fillStyle=hot?'rgba(255,60,90,.5)':'rgba(255,60,90,.15)';
+  ctx.strokeStyle='#ff3d7f';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(t.x,t.y,hot?t.r+8:t.r,0,Math.PI*2);ctx.fill();ctx.stroke();
+  ctx.font='28px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('🗑',t.x,t.y+2);
 }
 function drawHands(t){
   for(const h of hands){
@@ -200,15 +370,18 @@ function drawHands(t){
     for(const p of P)ctx.fillRect(p.x-2.5,p.y-2.5,5,5);
     if(h.sx!=null){
       ctx.strokeStyle=h.pinching?'#ff3d7f':'#0ff';ctx.lineWidth=2;
-      ctx.beginPath();ctx.arc(h.sx,h.sy,h.pinching?10:18,0,Math.PI*2);
-      ctx.moveTo(h.sx+26*Math.cos(t*0.004),h.sy+26*Math.sin(t*0.004));
-      ctx.arc(h.sx,h.sy,26,t*0.004,t*0.004+1.2);ctx.stroke();
+      ctx.beginPath();ctx.arc(h.sx,h.sy,h.pinching?10:18,0,Math.PI*2);ctx.stroke();
+    }
+    if(h.dwellBtn&&!h.dwellDone){                     // air-click progress ring
+      const tip=P[8],p=Math.min((t-h.dwellStart)/DWELL,1);
+      ctx.strokeStyle='#ffd23d';ctx.lineWidth=4;ctx.beginPath();
+      ctx.arc(tip.x,tip.y,20,-Math.PI/2,-Math.PI/2+p*Math.PI*2);ctx.stroke();
     }
   }
 }
 
-/* ---------- adaptive hand detection: if the phone is slow, detect less often ---------- */
-let lastVT=-1, lastDetect=0, detectGap=33, detectMs=0;
+/* ---------- main loop with adaptive hand detection ---------- */
+let lastVT=-1,lastDetect=0,detectGap=33,detectMs=0;
 let fps=0,fT=performance.now(),fN=0,lastT=performance.now();
 function loop(t){
   const k=Math.min((t-lastT)/16.67,3); lastT=t;
@@ -217,19 +390,30 @@ function loop(t){
     const s=performance.now();
     try{handleHands(landmarker.detectForVideo(video,s));}catch(e){}
     detectMs=detectMs*0.8+(performance.now()-s)*0.2;
-    detectGap=Math.min(Math.max(33,detectMs*2.2),150);   // keep main thread at least ~55% free for rendering
+    detectGap=Math.min(Math.max(33,detectMs*2.2),150);
   }
   updateHands(t);
   physics(k);
   ctx.clearRect(0,0,W,H);
+  for(const s of shapes){ if(s.type==='line')drawLine(s); else if(s.type==='rect')drawRect(s); else drawWindow(s,t); }
+  drawPreviews();
   drawBalls(t);
+  drawTrash();
   drawHands(t);
-  fN++;if(t-fT>1000){fps=fN;fN=0;fT=t;
-    status.textContent=`FPS ${fps} | HAND ${Math.round(1000/detectGap)}/s (${detectMs.toFixed(0)}ms) | HANDS ${hands.filter(h=>h.P).length}`;}
+  fN++;if(t-fT>1000){fps=fN;fN=0;fT=t;fpsHist.push(fps);if(fpsHist.length>60)fpsHist.shift();
+    status.textContent=`FPS ${fps} | HAND ${Math.round(1000/detectGap)}/s | ${tool.toUpperCase()}`;}
   requestAnimationFrame(loop);
 }
 
-/* ---------- start ---------- */
+/* ---------- UI ---------- */
+document.querySelectorAll('#tools button').forEach(b=>b.onclick=()=>{
+  tool=b.dataset.tool;
+  document.querySelectorAll('#tools button').forEach(x=>x.classList.toggle('on',x===b));
+});
+document.getElementById('add').onclick=()=>{if(balls.length<12)balls.push(makeBall(balls.length));};
+document.getElementById('clear').onclick=()=>{shapes=[];winCount=0;};
+document.getElementById('cam').onclick=()=>{showCam=!showCam;video.style.visibility=showCam?'visible':'hidden';};
+
 let stream=null;
 async function openCamera(){
   stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:30,max:30}},audio:false});
@@ -245,21 +429,18 @@ document.getElementById('go').onclick=async()=>{
     try{landmarker=await HandLandmarker.createFromOptions(vision,opts("GPU"));}
     catch(e){landmarker=await HandLandmarker.createFromOptions(vision,opts("CPU"));}
     document.getElementById('start').style.display='none';
+    document.getElementById('tools').style.display='flex';
     document.getElementById('bar').style.display='flex';
   }catch(e){
     btn.textContent='הפעל מערכת';btn.disabled=false;
     err.textContent='לא הצלחתי לפתוח מצלמה או לטעון את זיהוי הידיים: '+(e.message||e)+' — תוודא שאישרת מצלמה ושיש אינטרנט.';
   }
 };
-/* free the camera when the tab is hidden (saves memory/heat, avoids crashes), reopen when back */
 document.addEventListener('visibilitychange',async()=>{
   if(!landmarker)return;
   if(document.hidden){stream&&stream.getTracks().forEach(t=>t.stop());stream=null;}
   else{try{await openCamera();}catch(e){}}
 });
-document.getElementById('add').onclick=()=>{if(balls.length<12)balls.push(makeBall(balls.length));};
-document.getElementById('reset').onclick=reset;
-document.getElementById('cam').onclick=()=>{showCam=!showCam;video.style.visibility=showCam?'visible':'hidden';};
 requestAnimationFrame(loop);
 </script>
 </body>
