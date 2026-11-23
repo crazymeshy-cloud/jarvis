@@ -186,7 +186,7 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v17';
+const VERSION='v18';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
 let CLOSE_T=0.030, OPEN_T=0.050;        // thumb-to-index distance in METRES (3D), replaced by the user's own calibration
 try{const c=JSON.parse(localStorage.getItem('jarvis_calib3d')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
@@ -263,6 +263,8 @@ function handleHands(res){
     h.idx3=idx3;
     h.pose=closeLike?(valid?'pinch':'blocked'):(h.pointing?'point':'open');
     if(!(closeLike&&!valid))h.blockSince=null;
+    const wideOpen=pinchD>OPEN_T+0.012||(h.gesture==='Open_Palm'&&h.gScore>0.6);
+    if(wideOpen){ if(h.wideOpenSince==null)h.wideOpenSince=now; } else h.wideOpenSince=null;
     if(closeLike&&valid){
       h.openSince=null;
       if(h.closeSince==null){h.closeSince=now;log('pinchDown',`${slot?'B':'A'} d=${cm(pinchD)} g=${h.gesture||'-'}`+(h.pinching?' (already)':''));}
@@ -287,7 +289,7 @@ function forgetHand(h){
   log('hand-',(hands.indexOf(h)?'B':'A')+' why='+why+(h.action?' while '+h.action.kind:''));
   if(h.action)h.endReason='lost';
   endAction(h);
-  Object.assign(h,{pinching:false,P:null,sx:null,target:null,hist:[],dwellBtn:null,frames:0,closeSince:null,openSince:null,pointing:false,fx:null,fy:null,pose:null});
+  Object.assign(h,{pinching:false,P:null,sx:null,target:null,hist:[],dwellBtn:null,frames:0,closeSince:null,openSince:null,wideOpenSince:null,pointing:false,fx:null,fy:null,pose:null});
 }
 
 /* ---------- actions ---------- */
@@ -325,8 +327,8 @@ function endAction(h){
   const a=h.action; if(!a)return; h.action=null;
   { const dur=h.actStart?Math.round(performance.now()-h.actStart):0;
     const extra=a.kind==='box'?` ${Math.round(Math.abs(a.x1-a.x0))}x${Math.round(Math.abs(a.y1-a.y0))}`:a.kind==='draw'?` ${a.line.pts.length}pts`:` ${a.obj.type}`;
-    log('end',a.kind+extra+` ${dur}ms reason=${h.endReason||'open'}${a.kind==='grab'&&overTrash(h.sx??0,h.sy??0)?(performance.now()-a.t0>350?' →TRASH':' (near bin, kept)'):''}`);
-    h.endReason=null; }
+    log('end',a.kind+extra+` ${dur}ms reason=${h.endReason||'open'}${h.endD?' d='+cm(h.endD):''}${a.kind==='grab'&&overTrash(h.sx??0,h.sy??0)?(performance.now()-a.t0>350?' →TRASH':' (near bin, kept)'):''}`);
+    h.endReason=null; h.endD=null; }
   if(a.kind==='grab'){
     const o=a.obj;
     const carried=performance.now()-a.t0>350;
@@ -373,7 +375,8 @@ function dwell(h,now){
 function updateHands(now){
   hands.forEach(h=>{
     if(!h.target)return;
-    if(now-h.lastSeen>LOST_MS){forgetHand(h);return;}
+    const creating=h.action&&(h.action.kind==='box'||h.action.kind==='draw');
+    if(now-h.lastSeen>(creating?1300:LOST_MS)){forgetHand(h);return;}
     h.sx+=(h.target.x-h.sx)*0.5; h.sy+=(h.target.y-h.sy)*0.5;
     if(calib.step)return;
     h.hist=(h.hist||[]);h.hist.push({x:h.sx,y:h.sy,t:now});
@@ -396,7 +399,9 @@ function updateHands(now){
     if(h.closeSince==null)h.missLogged=false;
     h.lastCharge=h.charge;
     if(h.pinching){
-      if(h.openSince!=null&&now-h.openSince>=OPEN_MS){h.pinching=false;h.closeSince=null;h.rearmAt=now+250;endAction(h);}
+      const letGo=creating?(h.wideOpenSince!=null&&now-h.wideOpenSince>=300)   // drawing: only a clearly opened hand stops it
+                          :(h.openSince!=null&&now-h.openSince>=OPEN_MS);
+      if(letGo){h.pinching=false;h.closeSince=null;h.rearmAt=now+250;h.endD=h.pinchD;endAction(h);}
       else moveAction(h);
     }
     dwell(h,now);
