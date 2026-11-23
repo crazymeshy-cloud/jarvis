@@ -172,7 +172,7 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v8';
+const VERSION='v9';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
 let CLOSE_T=0.34, OPEN_T=0.50;          // pinch thresholds — replaced by the user's own calibration
 try{const c=JSON.parse(localStorage.getItem('jarvis_calib')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
@@ -235,7 +235,7 @@ function handleHands(res){
     /* ONLY real pinches count (👌 🤏 🫰): thumb tip on the index TIP, with the index finger not folded
        into the palm. A fist 👊, thumb-down 👎 or finger pointed at the camera 🫵 can bring thumb and
        index close in the picture, but the index is folded/foreshortened → blocked. */
-    const idxFolded=dist(P[8],P[5])<0.42*size;
+    const idxFolded=dist(P[8],P[5])<0.27*size;   // v8 used 0.42 and blocked real pinches (they measured 0.30-0.39)
     const thumbInPalm=dist(P[4],P[9])<0.30*size;
     const closeLike=pinchD<CLOSE_T, valid=!idxFolded&&!thumbInPalm;
     h.pose=closeLike?(valid?'pinch':'blocked'):(h.pointing?'point':'open');
@@ -250,6 +250,10 @@ function handleHands(res){
       if(h.openSince==null)h.openSince=now; if(now-h.openSince>=OPEN_MS)h.closeSince=null;   // cancel only when CLEARLY open for a moment
     }
     // in-between values are noise: they neither start nor cancel anything
+    if(!h.pinching&&pinchD>=CLOSE_T&&pinchD<=OPEN_T){
+      if(h.nearSince==null){h.nearSince=now;h.nearMin=pinchD;} else h.nearMin=Math.min(h.nearMin,pinchD);
+      if(!h.nearLogged&&now-h.nearSince>350){h.nearLogged=true;log('almostPinch',`min d=${h.nearMin.toFixed(2)} (needs <${CLOSE_T.toFixed(2)})`);}
+    } else {h.nearSince=null;h.nearLogged=false;}
   });
 }
 function forgetHand(h){
@@ -597,32 +601,38 @@ document.getElementById('twohands').onclick=async()=>{
 };
 let flashes=[];
 /* ---------- personal calibration: learns YOUR open hand and YOUR pinch ---------- */
-const calib={step:0,open:[],closed:[],t0:0,
-  begin(){this.step=1;this.open=[];this.closed=[];this.t0=performance.now();log('calib','start');},
-  sample(d){ if(this.step===1)this.open.push(d); else if(this.step===2)this.closed.push(d); },
+const calib={step:0,open:[],closed:[],need:14,
+  begin(){this.step=1;this.open=[];this.closed=[];this.lastD=null;log('calib','start');},
+  openRef(){const b=[...this.open].sort((x,y)=>x-y);return b.length?b[Math.floor(b.length/2)]:0.6;},
+  sample(d){
+    this.lastD=d;
+    if(this.step===1&&d>0.35)this.open.push(d);                       // only counts while the hand is really open
+    else if(this.step===2&&d<this.openRef()*0.5)this.closed.push(d);   // only counts while really pinching
+  },
   draw(t){
     if(!this.step)return;
-    const el=t-this.t0, DUR=2000, hasHand=hands.some(h=>h.P);
-    if(!hasHand)this.t0=t-Math.min(el,300);          // pause while no hand is visible
-    const prog=Math.min(el/DUR,1);
-    ctx.fillStyle='rgba(0,10,20,.75)';ctx.fillRect(0,H/2-70,W,140);
+    const arr=this.step===1?this.open:this.closed, prog=Math.min(arr.length/this.need,1);
+    const hasHand=hands.some(h=>h.P);
+    ctx.fillStyle='rgba(0,10,20,.8)';ctx.fillRect(0,H/2-80,W,160);
     ctx.fillStyle='#fff';ctx.font='700 20px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.fillText(this.step===1?'✋ פתח את היד והחזק':'🤏 צבוט והחזק',W/2,H/2-25);
-    ctx.font='13px system-ui';ctx.fillStyle='#9ff';ctx.fillText(hasHand?'כיול '+this.step+'/2':'תראה את היד למצלמה',W/2,H/2+5);
-    ctx.fillStyle='#033';ctx.fillRect(W*0.15,H/2+30,W*0.7,10);ctx.fillStyle='#0ff';ctx.fillRect(W*0.15,H/2+30,W*0.7*prog,10);
-    if(prog>=1){
-      if(this.step===1){this.step=2;this.t0=t;buzz(30);}
-      else this.finish();
+    ctx.fillText(this.step===1?'✋ פתח את היד לגמרי':'🤏 עכשיו צבוט — אגודל לקצה האצבע',W/2,H/2-35);
+    let hint='כיול '+this.step+'/2';
+    if(!hasHand)hint='תראה את היד למצלמה';
+    else if(this.lastD!=null){
+      if(this.step===1&&this.lastD<=0.35)hint='היד עדיין לא פתוחה — פתח את האצבעות';
+      if(this.step===2&&this.lastD>=this.openRef()*0.5)hint='צבוט חזק יותר';
     }
+    ctx.font='14px system-ui';ctx.fillStyle='#ffd23d';ctx.fillText(hint,W/2,H/2);
+    ctx.fillStyle='#033';ctx.fillRect(W*0.15,H/2+30,W*0.7,10);ctx.fillStyle='#0ff';ctx.fillRect(W*0.15,H/2+30,W*0.7*prog,10);
+    if(prog>=1){ if(this.step===1){this.step=2;this.lastD=null;buzz(30);} else this.finish(); }
   },
   finish(){
     this.step=0; buzz([30,50,30]);
-    const med=a=>{const b=[...a].sort((x,y)=>x-y);return b.length?b[Math.floor(b.length/2)]:NaN;};
-    const open=med(this.open), low=[...this.closed].sort((x,y)=>x-y).slice(0,Math.max(1,Math.ceil(this.closed.length/2)));
-    const closed=med(low);
-    if(this.open.length<5||this.closed.length<5||!(open-closed>0.25)){
-      log('calib',`failed open=${open} closed=${closed} n=${this.open.length}/${this.closed.length}`);
-      flash('הכיול לא הצליח — נשארים הערכים הרגילים',W/2,H/2);return;}
+    const med=a=>{const b=[...a].sort((x,y)=>x-y);return b[Math.floor(b.length/2)];};
+    const open=med(this.open), closed=med(this.closed);
+    if(!(open-closed>0.2)){
+      log('calib',`failed open=${open.toFixed(2)} closed=${closed.toFixed(2)}`);
+      flash('הכיול לא הצליח — לחץ 🎯 לנסות שוב',W/2,H/2);return;}
     CLOSE_T=Math.min(Math.max(closed+(open-closed)*0.35,0.2),0.5);
     OPEN_T=Math.min(Math.max(closed+(open-closed)*0.6,CLOSE_T+0.08),0.85);
     try{localStorage.setItem('jarvis_calib',JSON.stringify({close:CLOSE_T,open:OPEN_T}));}catch(e){}
