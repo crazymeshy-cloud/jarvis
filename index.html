@@ -300,7 +300,7 @@ function updateHands(now){
     const stable=h.frames>=3;
     // start: pinch held long enough (shorter when grabbing something that is right there)
     h.charge=0;
-    if(!h.pinching&&stable&&h.closeSince!=null&&!buttonAt(h.sx,h.sy)){
+    if(!h.pinching&&stable&&h.closeSince!=null&&now>=(h.rearmAt||0)&&h.openSince==null&&!buttonAt(h.sx,h.sy)){
       const need=(tool==='move')?HOLD_GRAB:HOLD_CREATE;
       if(tool==='move'&&!grabTarget(h.sx,h.sy)){h.charge=0;}       // nothing to grab → nothing happens
       else{
@@ -314,7 +314,7 @@ function updateHands(now){
     if(h.closeSince==null)h.missLogged=false;
     h.lastCharge=h.charge;
     if(h.pinching){
-      if(h.openSince!=null&&now-h.openSince>=OPEN_MS){h.pinching=false;endAction(h);}
+      if(h.openSince!=null&&now-h.openSince>=OPEN_MS){h.pinching=false;h.closeSince=null;h.rearmAt=now+250;endAction(h);}
       else moveAction(h);
     }
     dwell(h,now);
