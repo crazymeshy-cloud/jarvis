@@ -53,6 +53,12 @@
   <button class="air" id="add">➕ כדור</button>
   <button class="air" id="clear">🧹 נקה</button>
   <button class="air" id="cam">📷</button>
+  <button id="copylog">📋 לוג</button>
+</div>
+<div id="logbox" style="display:none;position:fixed;inset:10% 6%;z-index:6;background:#011;border:1px solid #0ff;border-radius:12px;padding:12px;flex-direction:column;gap:8px">
+  <div id="logmsg" style="color:#7dff6b;font-weight:700"></div>
+  <textarea id="logtext" readonly style="flex:1;background:#000;color:#9ff;border:1px solid #055;font:11px ui-monospace,monospace;direction:ltr"></textarea>
+  <button id="logclose">סגור</button>
 </div>
 
 <script type="module">
@@ -150,29 +156,42 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
 const HOLD_GRAB=140, HOLD_CREATE=260, LOST_MS=280, MIN_HAND_PX=45;
+
+/* ---------- black-box recorder: what happened, so Claude can analyse a session ---------- */
+const T0=performance.now(), LOG=[], STATS={};
+function log(ev,data){
+  STATS[ev]=(STATS[ev]||0)+1;
+  if(ev==='lowScore'||ev==='tooSmall')return;          // counted only, too frequent to list
+  LOG.push([Math.round((performance.now()-T0)/100)/10,ev,data??'']);
+  if(LOG.length>700)LOG.shift();
+}
 const extended=(P,tip,pip)=>dist(P[tip],P[0])>dist(P[pip],P[0])*1.12;
 function handleHands(res){
   updateMap();
   const now=performance.now(), used=new Set();
   (res.landmarks||[]).forEach((lms,i)=>{
     const cat=res.handedness&&res.handedness[i]&&res.handedness[i][0];
-    if(cat&&cat.score<0.75)return;                       // unsure detection → ignore
+    if(cat&&cat.score<0.75){log('lowScore');return;}     // unsure detection → ignore
     let slot=cat&&cat.categoryName==='Right'?1:0;
     if(used.has(slot))slot=1-slot; if(used.has(slot))return; used.add(slot);
     const P=lms.map(mapPt), h=hands[slot];
     const size=dist(P[0],P[9]);
-    if(size<MIN_HAND_PX)return;                          // too far / tiny → ignore
+    if(size<MIN_HAND_PX){log('tooSmall');return;}       // too far / tiny → ignore
     h.P=P; h.lastSeen=now; h.frames=(h.frames||0)+1;
+    if(h.frames===1)log('hand+',slot?'R':'L');
     h.target={x:(P[4].x+P[8].x)/2,y:(P[4].y+P[8].y)/2};
     if(h.sx==null){h.sx=h.target.x;h.sy=h.target.y;}
     h.pointing=extended(P,8,6)&&!extended(P,12,10)&&!extended(P,16,14)&&!extended(P,20,18);
     const pinchD=dist(P[4],P[8])/size;
-    if(pinchD<0.30){ h.openCount=0; if(h.closeSince==null)h.closeSince=now; }
+    h.pinchD=pinchD;
+    if(pinchD<0.30){ h.openCount=0; if(h.closeSince==null){h.closeSince=now;log('pinchDown',(slot?'R':'L')+(h.pinching?' (already)':''));} }
     else if(pinchD>0.50){ h.closeSince=null; h.openCount=(h.openCount||0)+1; }
     else if(!h.pinching){ h.closeSince=null; }          // half-closed doesn't start anything
   });
 }
 function forgetHand(h){
+  log('hand-',(hands.indexOf(h)?'R':'L')+(h.action?' while '+h.action.kind:''));
+  if(h.action)h.endReason='lost';
   endAction(h);
   Object.assign(h,{pinching:false,P:null,sx:null,target:null,hist:[],dwellBtn:null,frames:0,closeSince:null,openCount:0,pointing:false});
 }
@@ -180,6 +199,7 @@ function forgetHand(h){
 /* ---------- actions ---------- */
 function startAction(h){
   const x=h.sx,y=h.sy;
+  { const o=tool==='move'?hitTest(x,y):null; log('start',tool+(o?' on '+o.type:'')+` @${Math.round(x)},${Math.round(y)}`); }
   if(tool==='move'){
     const o=hitTest(x,y); if(!o)return;
     o.held=true;
@@ -205,6 +225,10 @@ function moveAction(h){
 }
 function endAction(h){
   const a=h.action; if(!a)return; h.action=null;
+  { const dur=h.actStart?Math.round(performance.now()-h.actStart):0;
+    const extra=a.kind==='box'?` ${Math.round(Math.abs(a.x1-a.x0))}x${Math.round(Math.abs(a.y1-a.y0))}`:a.kind==='draw'?` ${a.line.pts.length}pts`:` ${a.obj.type}`;
+    log('end',a.kind+extra+` ${dur}ms reason=${h.endReason||'open'}${a.kind==='grab'&&overTrash(h.sx??0,h.sy??0)?' →TRASH':''}`);
+    h.endReason=null; }
   if(a.kind==='grab'){
     const o=a.obj;
     if(overTrash(h.sx??0,h.sy??0)){removeObj(o);return;}
@@ -241,7 +265,7 @@ function dwell(h,now){
   if(!h.P||h.pinching||h.action||!h.pointing){h.dwellBtn=null;return;}
   const tip=h.P[8], b=buttonAt(tip.x,tip.y);
   if(b!==h.dwellBtn){h.dwellBtn=b;h.dwellStart=now;h.dwellDone=false;}
-  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;b.click();}
+  if(b&&!h.dwellDone&&now-h.dwellStart>=DWELL){h.dwellDone=true;log('airClick',b.dataset.tool||b.id);b.click();}
 }
 
 function updateHands(now){
@@ -259,9 +283,14 @@ function updateHands(now){
       if(tool==='move'&&!hitTest(h.sx,h.sy)){h.charge=0;}       // nothing to grab → nothing happens
       else{
         h.charge=Math.min((now-h.closeSince)/need,1);
-        if(h.charge>=1){h.pinching=true;h.charge=0;startAction(h);}
+        if(h.charge>=1){h.pinching=true;h.charge=0;h.actStart=now;startAction(h);}
       }
     }
+    if(!h.pinching&&h.closeSince==null&&h.lastCharge>0&&h.charge===0)
+      log('chargeCancel',Math.round(h.lastCharge*100)+'%');
+    if(!h.pinching&&h.closeSince!=null&&tool==='move'&&!hitTest(h.sx,h.sy)&&!h.missLogged){h.missLogged=true;log('pinchOnNothing');}
+    if(h.closeSince==null)h.missLogged=false;
+    h.lastCharge=h.charge;
     if(h.pinching){
       if((h.openCount||0)>=2){h.pinching=false;endAction(h);}
       else moveAction(h);
@@ -440,6 +469,7 @@ function loop(t){
   drawTrash();
   drawHands(t);
   fN++;if(t-fT>1000){fps=fN;fN=0;fT=t;fpsHist.push(fps);if(fpsHist.length>60)fpsHist.shift();
+    if(landmarker)log('perf',`fps=${fps} det=${detectMs.toFixed(0)}ms hz=${Math.round(1000/detectGap)} hands=${hands.filter(h=>h.P).length}`);
     status.textContent=`FPS ${fps} | HAND ${Math.round(1000/detectGap)}/s | ${tool.toUpperCase()}`;}
   requestAnimationFrame(loop);
 }
@@ -451,6 +481,21 @@ document.querySelectorAll('#tools button').forEach(b=>b.onclick=()=>{
 });
 document.getElementById('add').onclick=()=>{if(balls.length<12)balls.push(makeBall(balls.length));};
 document.getElementById('clear').onclick=()=>{shapes=[];winCount=0;};
+document.getElementById('copylog').onclick=async()=>{
+  const secs=Math.round((performance.now()-T0)/1000);
+  const txt=['JARVIS LOG v1',
+    `session ${secs}s | screen ${W}x${H} dpr ${devicePixelRatio} | cam ${video.videoWidth}x${video.videoHeight} | tool ${tool}`,
+    navigator.userAgent.replace(/\(([^)]*)\)/,(m,g)=>'('+g.slice(0,60)+')').slice(0,160),
+    'STATS '+JSON.stringify(STATS),
+    'objects: balls='+balls.length+' shapes='+shapes.length,
+    '--- events [sec, event, data] ---',
+    ...LOG.map(e=>e.join(' | '))].join('\n');
+  const box=document.getElementById('logbox'),ta=document.getElementById('logtext'),msg=document.getElementById('logmsg');
+  ta.value=txt; box.style.display='flex';
+  try{await navigator.clipboard.writeText(txt);msg.textContent='✅ הועתק! תדביק ל-Claude בצ׳אט.';}
+  catch(e){ta.focus();ta.select();msg.textContent='סמן הכל בתיבה, העתק, ותדביק ל-Claude.';}
+};
+document.getElementById('logclose').onclick=()=>document.getElementById('logbox').style.display='none';
 document.getElementById('cam').onclick=()=>{showCam=!showCam;video.style.visibility=showCam?'visible':'hidden';};
 
 let stream=null;
