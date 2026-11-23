@@ -186,7 +186,7 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v18';
+const VERSION='v19';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
 let CLOSE_T=0.030, OPEN_T=0.050;        // thumb-to-index distance in METRES (3D), replaced by the user's own calibration
 try{const c=JSON.parse(localStorage.getItem('jarvis_calib3d')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
@@ -302,6 +302,11 @@ function startAction(h){
   }
   if(tool==='move'){
     const o=grabTarget(x,y); if(!o)return; buzz(15);
+    if(o.kind==='youtube'){
+      const TB=26, now=performance.now();
+      if(x>o.x+o.w-40&&y>o.y+o.h-40){ o.held=true; h.action={kind:'resize',obj:o,lx:x,ly:y,t0:now}; log('ytGesture','resize'); return; }
+      if(y>o.y+TB+6&&o.view!=='player'){ o.held=true; o.scrollV=0; h.action={kind:'scroll',obj:o,lx:x,ly:y,sx0:x,sy0:y,t0:now,moved:0,v:0}; return; }
+    }
     o.held=true;
     if(o.type==='ball'){o.held=hands.indexOf(h);}
     else {shapes=shapes.filter(s=>s!==o);shapes.push(o);}   // bring to front
@@ -322,6 +327,13 @@ function moveAction(h){
     const p=a.line.pts[a.line.pts.length-1];
     if(Math.hypot(x-p.x,y-p.y)>4)a.line.pts.push({x,y});
   } else if(a.kind==='box'){a.x1=x;a.y1=y;}
+  else if(a.kind==='resize'){
+    const o=a.obj, dx=x-a.lx, dy=y-a.ly; a.lx=x;a.ly=y;
+    o.w=Math.min(Math.max(220,o.w+dx),W-o.x-4); o.h=Math.min(Math.max(160,o.h+dy),H-o.y-4);
+  } else if(a.kind==='scroll'){
+    const dy=y-a.ly, dx=x-a.lx; a.lx=x;a.ly=y; a.moved+=Math.abs(dx)+Math.abs(dy);
+    a.obj.scroll=(a.obj.scroll||0)-dy; a.v=-dy;          // content follows the hand, like dragging a phone screen
+  }
 }
 function endAction(h){
   const a=h.action; if(!a)return; h.action=null;
@@ -329,6 +341,18 @@ function endAction(h){
     const extra=a.kind==='box'?` ${Math.round(Math.abs(a.x1-a.x0))}x${Math.round(Math.abs(a.y1-a.y0))}`:a.kind==='draw'?` ${a.line.pts.length}pts`:` ${a.obj.type}`;
     log('end',a.kind+extra+` ${dur}ms reason=${h.endReason||'open'}${h.endD?' d='+cm(h.endD):''}${a.kind==='grab'&&overTrash(h.sx??0,h.sy??0)?(performance.now()-a.t0>350?' →TRASH':' (near bin, kept)'):''}`);
     h.endReason=null; h.endD=null; }
+  if(a.kind==='resize'){a.obj.held=false;buzz(12);return;}
+  if(a.kind==='scroll'){
+    const o=a.obj; o.held=false;
+    if(a.moved<14&&performance.now()-a.t0<500){       // quick pinch without moving = tap → open the video under it
+      const b=hotspotAt(a.sx0,a.sy0); if(b&&b.id==='yt:video'){log('ytGesture','tap video');b.click();}
+    } else { o.scrollV=a.v; log('ytGesture','scroll'); }
+    return;
+  }
+  if(a.kind==='grab'&&a.obj.kind==='youtube'&&a.obj.view==='player'&&performance.now()-a.t0<450&&Math.hypot((h.sx??0)-a.sx0,(h.sy??0)-a.sy0)<16){
+    a.obj.held=false; moveShape(a.obj,a.sx0-(h.sx??a.sx0),a.sy0-(h.sy??a.sy0));   // quick pinch on the video = pause/play (and undo the tiny move)
+    log('ytGesture','tap play/pause'); ytCmd(a.obj,'play'); return;
+  }
   if(a.kind==='grab'){
     const o=a.obj;
     const carried=performance.now()-a.t0>350;
@@ -484,7 +508,10 @@ function drawWindow(s,t){
   });
   ctx.textAlign='left';
   if(s.kind!=='youtube'){ctx.fillStyle='#ff3d7f';ctx.beginPath();ctx.arc(s.x+s.w-14,s.y+TB/2,5,0,Math.PI*2);ctx.fill();}
-  if(s.kind==='youtube'){ if(s.view!=='player')drawYTGrid(s,TB); ctx.restore();return; }   // player view: a real YouTube player sits under the canvas
+  if(s.kind==='youtube'){ if(s.view!=='player')drawYTGrid(s,TB);
+    ctx.strokeStyle='#0ff';ctx.lineWidth=3;ctx.beginPath();                 // resize handle ◢
+    ctx.moveTo(s.x+s.w-6,s.y+s.h-24);ctx.lineTo(s.x+s.w-6,s.y+s.h-6);ctx.lineTo(s.x+s.w-24,s.y+s.h-6);ctx.stroke();
+    ctx.restore();return; }   // player view: a real YouTube player sits under the canvas
   const cx=s.x+s.w/2, cy=s.y+TB+(s.h-TB)/2, ch=s.h-TB;
   if(s.kind==='clock'){
     const d=new Date();
@@ -718,18 +745,18 @@ async function ytFetch(s,path){
     } else {
       s.items=(j.items||[]).map(it=>({id:typeof it.id==='string'?it.id:it.id.videoId,title:decodeHtml(it.snippet.title),
         ch:it.snippet.channelTitle,thumb:(it.snippet.thumbnails.medium||it.snippet.thumbnails.default).url})).filter(x=>x.id);
-      s.page=0; if(!s.items.length)s.msg='לא נמצאו סרטונים';
+      s.page=0; s.scroll=0; s.scrollV=0; if(!s.items.length)s.msg='לא נמצאו סרטונים';
       log('yt',`loaded ${s.items.length} videos`);
     }
   }catch(e){log('yt','network error');s.msg='אין חיבור ליוטיוב';}
   s.loading=false;
 }
 const decodeHtml=t=>{const d=document.createElement('textarea');d.innerHTML=t;return d.value;};
-function ytHome(s){ytBack(s,true);s.title='YOUTUBE · פופולרי';ytFetch(s,'videos?part=snippet&chart=mostPopular&regionCode=IL&maxResults=24');}
+function ytHome(s){ytBack(s,true);s.title='YOUTUBE · פופולרי';ytFetch(s,'videos?part=snippet&chart=mostPopular&regionCode=IL&maxResults=48');}
 function ytSearch(s,q){
   if(!q)return; ytBack(s,true); s.title='🔍 '+q;
   log('ytSearch',q.slice(0,40));
-  ytFetch(s,'search?part=snippet&type=video&videoEmbeddable=true&maxResults=24&q='+encodeURIComponent(q));
+  ytFetch(s,'search?part=snippet&type=video&videoEmbeddable=true&maxResults=48&q='+encodeURIComponent(q));
 }
 function ytSearchPrompt(s){ytSearch(s,(prompt('מה לחפש ביוטיוב?','')||'').trim());}
 function ytVoice(s){
@@ -764,25 +791,28 @@ function drawYTGrid(s,TB){
     return;
   }
   const cols=Math.max(1,Math.floor(aw/150)), gap=6, cw=(aw-(cols-1)*gap)/cols, th=cw*9/16, ch=th+30;
-  const rows=Math.max(1,Math.floor((ah-26)/(ch+gap))), per=cols*rows, pages=Math.ceil(s.items.length/per);
-  s.page=Math.min(s.page||0,pages-1);
-  s.items.slice(s.page*per,s.page*per+per).forEach((it,i)=>{
-    const cx=x0+(i%cols)*(cw+gap), cy=y0+Math.floor(i/cols)*(ch+gap);
+  const rowsTotal=Math.ceil(s.items.length/cols), contentH=rowsTotal*(ch+gap), maxScroll=Math.max(0,contentH-ah);
+  if(!s.held&&s.scrollV){s.scroll=(s.scroll||0)+s.scrollV; s.scrollV*=0.92; if(Math.abs(s.scrollV)<0.3)s.scrollV=0;}   // glide after letting go
+  s.scroll=Math.min(Math.max(s.scroll||0,0),maxScroll);
+  const top=s.y+TB+2, bottom=s.y+s.h-2;
+  ctx.save(); ctx.beginPath(); ctx.rect(s.x,top,s.w,bottom-top); ctx.clip();
+  s.items.forEach((it,i)=>{
+    const cx=x0+(i%cols)*(cw+gap), cy=y0+Math.floor(i/cols)*(ch+gap)-s.scroll;
+    if(cy+ch<top||cy>bottom)return;                     // off-screen
     const im=thumb(it.thumb);
     if(im)ctx.drawImage(im,cx,cy,cw,th); else {ctx.fillStyle='#012';ctx.fillRect(cx,cy,cw,th);}
     ctx.strokeStyle='rgba(0,229,255,.5)';ctx.lineWidth=1;ctx.strokeRect(cx,cy,cw,th);
     ctx.fillStyle='#fff';ctx.font='600 11px system-ui';ctx.textAlign='right';
     ctx.fillText(fitText(it.title,cw-4),cx+cw-2,cy+th+9);
     ctx.fillStyle='#8cc';ctx.font='10px system-ui';ctx.fillText(fitText(it.ch||'',cw-4),cx+cw-2,cy+th+22);
-    hotspots.push({x:cx,y:cy,w:cw,h:th+26,id:'yt:video',dataset:{},click:()=>ytPlay(s,it)});
+    const vy=Math.max(cy,top), vh=Math.min(cy+th+26,bottom)-vy;
+    if(vh>10)hotspots.push({x:cx,y:vy,w:cw,h:vh,id:'yt:video',dataset:{},click:()=>ytPlay(s,it)});
   });
-  if(pages>1){
-    const by=s.y+s.h-24; ctx.textAlign='center';ctx.font='15px system-ui';
-    [['◀',-1,s.x+s.w/2-70],['▶',1,s.x+s.w/2+40]].forEach(([ic,d,bx])=>{
-      ctx.fillStyle='rgba(0,229,255,.2)';ctx.fillRect(bx,by,30,20);ctx.fillStyle='#fff';ctx.fillText(ic,bx+15,by+11);
-      hotspots.push({x:bx,y:by,w:30,h:20,id:'yt:page',dataset:{},click:()=>{s.page=(s.page+d+pages)%pages;buzz(8);}});
-    });
-    ctx.fillStyle='#9ff';ctx.font='11px system-ui';ctx.fillText(`${s.page+1}/${pages}`,s.x+s.w/2-5,by+11);
+  ctx.restore();
+  if(maxScroll>0){                                       // scrollbar
+    const trackH=bottom-top-8, barH=Math.max(24,trackH*ah/contentH), barY=top+4+(trackH-barH)*(s.scroll/maxScroll);
+    ctx.fillStyle='rgba(0,229,255,.15)';ctx.fillRect(s.x+s.w-5,top+4,3,trackH);
+    ctx.fillStyle='rgba(0,229,255,.8)';ctx.fillRect(s.x+s.w-5,barY,3,barH);
   }
 }
 function syncYT(){
