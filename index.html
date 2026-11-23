@@ -69,7 +69,7 @@
 </div>
 
 <script type="module">
-import {FilesetResolver, HandLandmarker} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import {FilesetResolver, GestureRecognizer} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 const video=document.getElementById('video'), cv=document.getElementById('c');
 const ctx=cv.getContext('2d',{alpha:true,desynchronized:true});
@@ -172,10 +172,10 @@ const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
    - a pinch ends only after the fingers are clearly open for 2 checks
    - buttons and pushing balls need a POINTING hand (only index finger up)
    - a hand that flickers out for a moment keeps what it's holding        */
-const VERSION='v10';
+const VERSION='v11';
 const HOLD_GRAB=140, HOLD_CREATE=220, HOLD_DELETE=380, LOST_MS=650, OPEN_MS=180;  // fingers must stay open 180ms to cancel/release
-let CLOSE_T=0.34, OPEN_T=0.50;          // pinch thresholds — replaced by the user's own calibration
-try{const c=JSON.parse(localStorage.getItem('jarvis_calib')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
+let CLOSE_T=0.030, OPEN_T=0.050;        // thumb-to-index distance in METRES (3D), replaced by the user's own calibration
+try{const c=JSON.parse(localStorage.getItem('jarvis_calib3d')||'null'); if(c&&c.close&&c.open){CLOSE_T=c.close;OPEN_T=c.open;}}catch(e){}
 const buzz=p=>{try{navigator.vibrate&&navigator.vibrate(p);}catch(e){}};
 let lastIgnored={why:'',t:0}, jitSum=0, jitN=0;
 /* One Euro filter: steady when the hand is still, no lag when it moves fast */
@@ -201,6 +201,7 @@ function log(ev,data){
   LOG.push([Math.round((performance.now()-T0)/100)/10,ev,data??'']);
   if(LOG.length>700)LOG.shift();
 }
+const dist3=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z), cm=v=>(v*100).toFixed(1)+'cm';
 const extended=(P,tip,pip)=>dist(P[tip],P[0])>dist(P[pip],P[0])*1.12;
 function handleHands(res){
   updateMap();
@@ -228,25 +229,33 @@ function handleHands(res){
     h.target={x:h.fx.f(rx,now),y:h.fy.f(ry,now)};
     jitSum+=Math.hypot(rx-h.target.x,ry-h.target.y); jitN++;
     if(h.sx==null){h.sx=h.target.x;h.sy=h.target.y;}
-    h.pointing=extended(P,8,6)&&!extended(P,12,10)&&!extended(P,16,14)&&!extended(P,20,18);
-    const pinchD=dist(P[4],P[8])/size;
+    const W3=res.worldLandmarks&&res.worldLandmarks[i];
+    const gst=res.gestures&&res.gestures[i]&&res.gestures[i][0];
+    h.gesture=gst?gst.categoryName:''; h.gScore=gst?gst.score:0;
+    h.pointing=(h.gesture==='Pointing_Up'&&h.gScore>0.5)||(extended(P,8,6)&&!extended(P,12,10)&&!extended(P,16,14)&&!extended(P,20,18));
+    if(!W3){log('no3d');return;}
+    const pinchD=dist3(W3[4],W3[8]);            // real distance between thumb tip and index tip
     h.pinchD=pinchD;
     if(calib.step){calib.sample(pinchD);return;}
     /* ONLY real pinches count (👌 🤏 🫰): thumb tip on the index TIP, with the index finger not folded
        into the palm. A fist 👊, thumb-down 👎 or finger pointed at the camera 🫵 can bring thumb and
        index close in the picture, but the index is folded/foreshortened → blocked. */
-    const idxFolded=dist(P[8],P[5])<0.22*size;   // real pinches measured 0.29-0.41; a folded index is lower   // v8 used 0.42 and blocked real pinches (they measured 0.30-0.39)
-    const thumbInPalm=dist(P[4],P[9])<0.30*size;
-    const closeLike=pinchD<CLOSE_T, valid=!idxFolded&&!thumbInPalm;
+    /* In 3D a fist doesn't look like a pinch at all (thumb lies on the middle of the fingers, ~3-4cm from the
+       index TIP). The trained classifier catches the rest: fist / thumb down / thumb up. */
+    const idx3=dist3(W3[8],W3[5]);
+    const isFist=(h.gesture==='Closed_Fist'&&h.gScore>0.7&&idx3<0.045)||idx3<0.028;
+    const isThumb=(h.gesture==='Thumb_Down'||h.gesture==='Thumb_Up')&&h.gScore>0.6;
+    const closeLike=pinchD<CLOSE_T, valid=!isFist&&!isThumb;
+    h.idx3=idx3;
     h.pose=closeLike?(valid?'pinch':'blocked'):(h.pointing?'point':'open');
     if(!(closeLike&&!valid))h.blockSince=null;
     if(closeLike&&valid){
       h.openSince=null;
-      if(h.closeSince==null){h.closeSince=now;log('pinchDown',`${slot?'B':'A'} d=${pinchD.toFixed(2)}`+(h.pinching?' (already)':''));}
+      if(h.closeSince==null){h.closeSince=now;log('pinchDown',`${slot?'B':'A'} d=${cm(pinchD)} g=${h.gesture||'-'}`+(h.pinching?' (already)':''));}
     } else if(closeLike&&!valid){
       if(h.blockSince==null)h.blockSince=now;
       if(!h.pinching&&h.closeSince!=null&&now-h.blockSince>=150)h.closeSince=null;   // fist etc. never starts anything (one odd frame is ignored)
-      if(!h.blockLogged){h.blockLogged=true;log('blockedPose',`d=${pinchD.toFixed(2)} idx=${(dist(P[8],P[5])/size).toFixed(2)} thumb=${(dist(P[4],P[9])/size).toFixed(2)}`);}
+      if(!h.blockLogged){h.blockLogged=true;log('blockedPose',`d=${cm(pinchD)} idx=${cm(idx3)} g=${h.gesture}:${h.gScore.toFixed(2)}`);}
     } else if(pinchD>OPEN_T){
       h.blockLogged=false;
       if(h.openSince==null)h.openSince=now; if(now-h.openSince>=OPEN_MS)h.closeSince=null;   // cancel only when CLEARLY open for a moment
@@ -254,7 +263,7 @@ function handleHands(res){
     // in-between values are noise: they neither start nor cancel anything
     if(!h.pinching&&pinchD>=CLOSE_T&&pinchD<=OPEN_T){
       if(h.nearSince==null){h.nearSince=now;h.nearMin=pinchD;} else h.nearMin=Math.min(h.nearMin,pinchD);
-      if(!h.nearLogged&&now-h.nearSince>350){h.nearLogged=true;log('almostPinch',`min d=${h.nearMin.toFixed(2)} (needs <${CLOSE_T.toFixed(2)})`);}
+      if(!h.nearLogged&&now-h.nearSince>350){h.nearLogged=true;log('almostPinch',`min d=${cm(h.nearMin)} (needs <${cm(CLOSE_T)}) g=${h.gesture||'-'}`);}
     } else {h.nearSince=null;h.nearLogged=false;}
   });
 }
@@ -367,7 +376,7 @@ function updateHands(now){
       }
     }
     if(!h.pinching&&h.closeSince==null&&h.lastCharge>0&&h.charge===0)
-      log('chargeCancel',Math.round(h.lastCharge*100)+'% d='+(h.pinchD||0).toFixed(2));
+      log('chargeCancel',Math.round(h.lastCharge*100)+'% d='+cm(h.pinchD||0)+' g='+(h.gesture||'-'));
     if(!h.pinching&&h.closeSince!=null&&(tool==='move'||tool==='del')&&!grabTarget(h.sx,h.sy)&&!h.missLogged){h.missLogged=true;log('pinchOnNothing');}
     if(h.closeSince==null)h.missLogged=false;
     h.lastCharge=h.charge;
@@ -548,7 +557,7 @@ function loop(t){
   if(landmarker&&video.readyState>=2&&video.currentTime!==lastVT&&t-lastDetect>=detectGap){
     lastVT=video.currentTime; lastDetect=t;
     const s=performance.now();
-    try{handleHands(landmarker.detectForVideo(video,s));}catch(e){}
+    try{handleHands(landmarker.recognizeForVideo(video,s));}catch(e){}
     detectMs=detectMs*0.8+(performance.now()-s)*0.2;
     detectGap=Math.min(Math.max(33,detectMs*1.4),150);
   }
@@ -579,7 +588,7 @@ document.getElementById('add').onclick=()=>{if(balls.length<12)balls.push(makeBa
 document.getElementById('clear').onclick=()=>{shapes=[];winCount=0;saveScene();};
 document.getElementById('copylog').onclick=async()=>{
   const secs=Math.round((performance.now()-T0)/1000);
-  const txt=['JARVIS LOG '+VERSION+` | pinch close<${CLOSE_T.toFixed(2)} open>${OPEN_T.toFixed(2)}`,
+  const txt=['JARVIS LOG '+VERSION+` | 3D pinch close<${cm(CLOSE_T)} open>${cm(OPEN_T)}`,
     `session ${secs}s | screen ${W}x${H} dpr ${devicePixelRatio} | cam ${video.videoWidth}x${video.videoHeight} | tool ${tool}`,
     navigator.userAgent.replace(/\(([^)]*)\)/,(m,g)=>'('+g.slice(0,60)+')').slice(0,160),
     'STATS '+JSON.stringify(STATS),
@@ -605,10 +614,10 @@ let flashes=[];
 /* ---------- personal calibration: learns YOUR open hand and YOUR pinch ---------- */
 const calib={step:0,open:[],closed:[],need:14,
   begin(){this.step=1;this.open=[];this.closed=[];this.lastD=null;log('calib','start');},
-  openRef(){const b=[...this.open].sort((x,y)=>x-y);return b.length?b[Math.floor(b.length/2)]:0.6;},
+  openRef(){const b=[...this.open].sort((x,y)=>x-y);return b.length?b[Math.floor(b.length/2)]:0.08;},
   sample(d){
     this.lastD=d;
-    if(this.step===1&&d>0.35)this.open.push(d);                       // only counts while the hand is really open
+    if(this.step===1&&d>0.055)this.open.push(d);                       // only counts while the hand is really open
     else if(this.step===2&&d<this.openRef()*0.5)this.closed.push(d);   // only counts while really pinching
   },
   draw(t){
@@ -621,7 +630,7 @@ const calib={step:0,open:[],closed:[],need:14,
     let hint='כיול '+this.step+'/2';
     if(!hasHand)hint='תראה את היד למצלמה';
     else if(this.lastD!=null){
-      if(this.step===1&&this.lastD<=0.35)hint='היד עדיין לא פתוחה — פתח את האצבעות';
+      if(this.step===1&&this.lastD<=0.055)hint='היד עדיין לא פתוחה — פתח את האצבעות';
       if(this.step===2&&this.lastD>=this.openRef()*0.5)hint='צבוט חזק יותר';
     }
     ctx.font='14px system-ui';ctx.fillStyle='#ffd23d';ctx.fillText(hint,W/2,H/2);
@@ -632,13 +641,13 @@ const calib={step:0,open:[],closed:[],need:14,
     this.step=0; buzz([30,50,30]);
     const med=a=>{const b=[...a].sort((x,y)=>x-y);return b[Math.floor(b.length/2)];};
     const open=med(this.open), closed=med(this.closed);
-    if(!(open-closed>0.2)){
-      log('calib',`failed open=${open.toFixed(2)} closed=${closed.toFixed(2)}`);
+    if(!(open-closed>0.025)){
+      log('calib',`failed open=${cm(open)} closed=${cm(closed)}`);
       flash('הכיול לא הצליח — לחץ 🎯 לנסות שוב',W/2,H/2);return;}
-    CLOSE_T=Math.min(Math.max(closed+(open-closed)*0.35,0.2),0.5);
-    OPEN_T=Math.min(Math.max(closed+(open-closed)*0.6,CLOSE_T+0.08),0.85);
-    try{localStorage.setItem('jarvis_calib',JSON.stringify({close:CLOSE_T,open:OPEN_T}));}catch(e){}
-    log('calib',`ok open=${open.toFixed(2)} closed=${closed.toFixed(2)} → close<${CLOSE_T.toFixed(2)} open>${OPEN_T.toFixed(2)}`);
+    CLOSE_T=Math.min(Math.max(closed+(open-closed)*0.3,0.018),0.05);
+    OPEN_T=Math.min(Math.max(closed+(open-closed)*0.55,CLOSE_T+0.01),0.09);
+    try{localStorage.setItem('jarvis_calib3d',JSON.stringify({close:CLOSE_T,open:OPEN_T}));}catch(e){}
+    log('calib',`ok open=${cm(open)} closed=${cm(closed)} → close<${cm(CLOSE_T)} open>${cm(OPEN_T)}`);
     flash('✅ הכיול נשמר',W/2,H/2);
   }
 };
@@ -672,11 +681,11 @@ document.getElementById('go').onclick=async()=>{
   try{
     await openCamera();
     const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
-    const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",delegate:d},runningMode:"VIDEO",numHands:1,minHandDetectionConfidence:0.6,minHandPresenceConfidence:0.5,minTrackingConfidence:0.5});
-    try{landmarker=await HandLandmarker.createFromOptions(vision,opts("GPU"));}
-    catch(e){landmarker=await HandLandmarker.createFromOptions(vision,opts("CPU"));}
+    const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",delegate:d},runningMode:"VIDEO",numHands:1,minHandDetectionConfidence:0.6,minHandPresenceConfidence:0.5,minTrackingConfidence:0.5});
+    try{landmarker=await GestureRecognizer.createFromOptions(vision,opts("GPU"));}
+    catch(e){landmarker=await GestureRecognizer.createFromOptions(vision,opts("CPU"));}
     document.getElementById('start').style.display='none';
-    let hasCal=false; try{hasCal=!!localStorage.getItem('jarvis_calib');}catch(e){}
+    let hasCal=false; try{hasCal=!!localStorage.getItem('jarvis_calib3d');}catch(e){}
     if(!hasCal)calib.begin();
     document.getElementById('tools').style.display='flex';
     document.getElementById('bar').style.display='flex';
